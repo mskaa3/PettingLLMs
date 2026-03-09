@@ -29,11 +29,10 @@ export WANDB_PROJECT="${WANDB_PROJECT:-pettingllms-quickstart}"
 export WANDB_NAME="${WANDB_NAME:-first_run}"
 
 ###############################################################################
-# Resolve repo location on host
-# This script can live anywhere inside the cloned repo.
+# Repo location on host
 ###############################################################################
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST_REPO_DIR="$SCRIPT_DIR"
+START_DIR="${HOST_REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+HOST_REPO_DIR="$START_DIR"
 
 while [[ "$HOST_REPO_DIR" != "/" ]]; do
   if [[ -f "$HOST_REPO_DIR/requirements_venv.txt" && \
@@ -45,7 +44,8 @@ while [[ "$HOST_REPO_DIR" != "/" ]]; do
 done
 
 if [[ "$HOST_REPO_DIR" == "/" ]]; then
-  echo "ERROR: Could not locate repo root from script location: $SCRIPT_DIR"
+  echo "ERROR: Could not locate repo root from start dir: $START_DIR"
+  echo "Tip: run 'sbatch' from the repo root, or set HOST_REPO_DIR explicitly."
   exit 1
 fi
 
@@ -54,6 +54,7 @@ if [[ ! -f "$HOST_REPO_DIR/$TRAIN_SCRIPT" ]]; then
   exit 1
 fi
 
+export HOST_REPO_DIR
 echo "Using HOST_REPO_DIR=$HOST_REPO_DIR"
 ls -lah "$HOST_REPO_DIR"
 
