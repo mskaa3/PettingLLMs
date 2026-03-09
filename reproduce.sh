@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
-#SBATCH --cpus-per-gpu=4
+#SBATCH --cpus-per-gpu=2
 #SBATCH --time=8:00:00
 #SBATCH --mem=0
 #SBATCH -p lem-gpu-short
 #SBATCH --verbose
-#SBATCH --gres=gpu:hopper:4
+#SBATCH --gres=gpu:hopper:2
 
 set -euo pipefail
 
@@ -116,6 +116,13 @@ export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
 
 export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
 export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
+
+# Critical: point Python at the repo's vendored verl submodule first
+export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs/verl:/workspace/PettingLLMs:${PYTHONPATH:-}"
+
+# Avoid hf_transfer failure unless it's installed in the image
+export APPTAINERENV_HF_HUB_ENABLE_HF_TRANSFER=0
+
 
 ###############################################################################
 # Command run inside container
