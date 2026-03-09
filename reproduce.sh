@@ -29,9 +29,33 @@ export WANDB_PROJECT="${WANDB_PROJECT:-pettingllms-quickstart}"
 export WANDB_NAME="${WANDB_NAME:-first_run}"
 
 ###############################################################################
-# Repo location on host
+# Resolve repo location on host
+# This script can live anywhere inside the cloned repo.
 ###############################################################################
-export HOST_REPO_DIR="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST_REPO_DIR="$SCRIPT_DIR"
+
+while [[ "$HOST_REPO_DIR" != "/" ]]; do
+  if [[ -f "$HOST_REPO_DIR/requirements_venv.txt" && \
+        -d "$HOST_REPO_DIR/pettingllms" && \
+        -d "$HOST_REPO_DIR/scripts" ]]; then
+    break
+  fi
+  HOST_REPO_DIR="$(dirname "$HOST_REPO_DIR")"
+done
+
+if [[ "$HOST_REPO_DIR" == "/" ]]; then
+  echo "ERROR: Could not locate repo root from script location: $SCRIPT_DIR"
+  exit 1
+fi
+
+if [[ ! -f "$HOST_REPO_DIR/$TRAIN_SCRIPT" ]]; then
+  echo "ERROR: Training script not found: $HOST_REPO_DIR/$TRAIN_SCRIPT"
+  exit 1
+fi
+
+echo "Using HOST_REPO_DIR=$HOST_REPO_DIR"
+ls -lah "$HOST_REPO_DIR"
 
 ###############################################################################
 # Scratch layout
@@ -59,6 +83,11 @@ mkdir -p \
 ###############################################################################
 echo "Downloading SIF from s3v2:$SIF_S3"
 rclone copy --progress "s3v2:$SIF_S3" "$RUN_ROOT/"
+
+if [[ ! -f "$LOCAL_SIF" ]]; then
+  echo "ERROR: SIF was not downloaded to $LOCAL_SIF"
+  exit 1
+fi
 
 ###############################################################################
 # Apptainer host/cache settings
@@ -103,6 +132,10 @@ mkdir -p /tmp/tmpdir/wandb/.config
 mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
 mkdir -p datasets
+
+echo "=== Mounted repo ==="
+pwd
+ls -lah .
 
 echo "=== Dataset preparation ==="
 if [[ "${PREPARE_CODE_DATA}" == "1" ]]; then
