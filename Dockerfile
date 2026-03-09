@@ -61,6 +61,7 @@ RUN python -m pip install \
 RUN python -m pip install ninja \
     && MAX_JOBS=${MAX_JOBS} python -m pip install flash-attn==2.8.3 --no-build-isolation
 
+
 # Clone once during image build only to install repo dependencies
 WORKDIR /opt/src
 RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} PettingLLMs \
@@ -71,5 +72,7 @@ RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} Pettin
     && python -m pip install -e . \
     && rm -rf /opt/src/PettingLLMs
 
+RUN python -m pip install hf_transfer
+RUN python -m pip install --no-cache-dir "numpy==1.26.4" "scipy==1.14.1"
 # Runtime mount point for your external repo
 WORKDIR /workspace/PettingLLMs
