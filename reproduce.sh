@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=pettingllms-quickstart
+#SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=2
-#SBATCH --cpus-per-gpu=8
-#SBATCH --time=48:00:00
-#SBATCH --mem=256gb
-#SBATCH -p H100
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --cpus-per-gpu=4
+#SBATCH --time=8:00:00
+#SBATCH --mem=0
+#SBATCH -p lem-gpu-short
+#SBATCH --verbose
+#SBATCH --gres=gpu:hopper:4
 
 set -euo pipefail
 
@@ -35,22 +34,23 @@ export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
 
 # Optional Hugging Face token / Weights & Biases
-# export HF_TOKEN="${HF_TOKEN:-}"
-# export WANDB_API_KEY="${WANDB_API_KEY:-}"
-
-###############################################################################
-# Scratch layout
-###############################################################################
+export HF_TOKEN="${HF_TOKEN:-}"
+export WANDB_API_KEY="${WANDB_API_KEY:-}"
 
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_ENTITY=moska-phd-research
 export WANDB_PROJECT=pettingllms-quickstart
 export WANDB_NAME=first_run
 
+###############################################################################
+# Scratch layout
+###############################################################################
+
 
 export RUN_ROOT="${TMPDIR:-/tmp}/pettingllms_${SLURM_JOB_ID}"
 export LOCAL_SIF="$RUN_ROOT/$(basename "$SIF_S3")"
 export LOCAL_HF_HOME="$RUN_ROOT/huggingface"
+export LOCAL_DATASETS="$RUN_ROOT/datasets"
 export LOCAL_WANDB_DIR="$RUN_ROOT/wandb"
 export LOCAL_TRITON_CACHE="$RUN_ROOT/triton"
 export LOCAL_TORCH_EXTENSIONS="$RUN_ROOT/torch_extensions"
@@ -59,6 +59,7 @@ export LOCAL_OUTPUT="$RUN_ROOT/output"
 
 mkdir -p \
   "$RUN_ROOT" \
+  "$LOCAL_DATASETS" \
   "$LOCAL_HF_HOME" \
   "$LOCAL_WANDB_DIR" \
   "$LOCAL_TRITON_CACHE" \
@@ -81,6 +82,10 @@ export APPTAINER_CACHEDIR="$LOCAL_APPTAINER_CACHE"
 export APPTAINERENV_TMPDIR="/tmp/tmpdir"
 export APPTAINERENV_HF_TOKEN="$HF_TOKEN"
 export APPTAINERENV_WANDB_API_KEY="$WANDB_API_KEY"
+
+export APPTAINERENV_WANDB_ENTITY="$WANDB_ENTITY"
+export APPTAINERENV_WANDB_PROJECT="$WANDB_PROJECT"
+export APPTAINERENV_WANDB_NAME="$WANDB_NAME"
 
 export APPTAINERENV_HF_HOME="/tmp/tmpdir/huggingface"
 export APPTAINERENV_TRANSFORMERS_CACHE="/tmp/tmpdir/huggingface/transformers"
@@ -108,6 +113,7 @@ mkdir -p /tmp/tmpdir/wandb/.cache
 mkdir -p /tmp/tmpdir/wandb/.config
 mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
+mkdir -p /workspace/PettingLLMs/datasets
 
 echo "=== Dataset preparation ==="
 if [[ "${PREPARE_CODE_DATA}" == "1" ]]; then
@@ -126,10 +132,10 @@ if [[ "${PREPARE_SOKOBAN_DATA}" == "1" ]]; then
 fi
 
 echo "=== Dataset directories after preparation ==="
-ls -lah datasets || true
-ls -lah datasets/code || true
-ls -lah datasets/math || true
-ls -lah datasets/sudoku_environments || true
+ls -lah /workspace/PettingLLMs/datasets || true
+ls -lah /workspace/PettingLLMs/datasets/code || true
+ls -lah /workspace/PettingLLMs/datasets/math || true
+ls -lah /workspace/PettingLLMs/datasets/sudoku_environments || true
 
 echo "=== Training ==="
 echo "Running: bash ${TRAIN_SCRIPT}"
@@ -142,6 +148,7 @@ BASH_EOF
 ###############################################################################
 srun apptainer exec --nv \
   --mount type=bind,src="$RUN_ROOT",dst=/tmp/tmpdir \
+  --mount type=bind,src="$LOCAL_DATASETS",dst=/workspace/PettingLLMs/datasets \
   "$LOCAL_SIF" \
   bash -c "$COMMAND"
 
