@@ -1,13 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=2
-#SBATCH --cpus-per-gpu=8
-#SBATCH --time=48:00:00
-#SBATCH --mem=256gb
-#SBATCH -p H100
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --cpus-per-gpu=4
+#SBATCH --time=8:00:00
+#SBATCH --mem=0
+#SBATCH -p lem-gpu-short
+#SBATCH --verbose
+#SBATCH --gres=gpu:hopper:4
 
 set -euo pipefail
 
