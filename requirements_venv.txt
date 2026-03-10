@@ -276,8 +276,7 @@ sacrebleu==2.5.1
 safehttpx==0.1.6
 safetensors==0.6.2
 scikit-image==0.25.2
-scikit-learn==1.7.1
-scipy==1.16.1
+scipy==1.13.1
 selenium==4.35.0
 semantic-version==2.10.0
 sentence-transformers==5.1.0

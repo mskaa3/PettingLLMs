@@ -61,18 +61,21 @@ RUN python -m pip install \
 RUN python -m pip install ninja \
     && MAX_JOBS=${MAX_JOBS} python -m pip install flash-attn==2.8.3 --no-build-isolation
 
+WORKDIR /tmp/build
 
-# Clone once during image build only to install repo dependencies
-WORKDIR /opt/src
 RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} PettingLLMs \
-    && cd /opt/src/PettingLLMs \
+    && cd PettingLLMs \
     && git submodule update --init --recursive \
     && python -m pip install -r requirements_venv.txt \
-    && if [ -d verl ]; then python -m pip install -e ./verl; fi \
-    && python -m pip install -e . \
-    && rm -rf /opt/src/PettingLLMs
+    && rm -rf /tmp/build
 
-RUN python -m pip install hf_transfer
-RUN python -m pip install --no-cache-dir "numpy==1.26.4" "scipy==1.14.1"
-# Runtime mount point for your external repo
+# Final compatibility override for this platform
+RUN python -m pip install --no-cache-dir --force-reinstall \
+    "numpy==1.26.4" \
+    "scipy==1.13.1"
+
+RUN python -m pip uninstall -y scikit-learn
+RUN python -m pip install torchdata
+
+
 WORKDIR /workspace/PettingLLMs
