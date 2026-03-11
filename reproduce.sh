@@ -19,7 +19,9 @@ export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiG
 export PREPARE_CODE_DATA="${PREPARE_CODE_DATA:-0}"
 export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
 export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
+
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
+export MODEL_0="${MODEL_0:-Qwen/Qwen3-1.7B}"
 
 export HF_TOKEN="${HF_TOKEN:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
@@ -104,6 +106,7 @@ export APPTAINERENV_HF_TOKEN="${HF_TOKEN}"
 export APPTAINERENV_HF_HOME="/tmp/tmpdir/huggingface"
 export APPTAINERENV_TRANSFORMERS_CACHE="/tmp/tmpdir/huggingface/transformers"
 export APPTAINERENV_HUGGINGFACE_HUB_CACHE="/tmp/tmpdir/huggingface/hub"
+export APPTAINERENV_HF_HUB_ENABLE_HF_TRANSFER=1
 
 export APPTAINERENV_WANDB_API_KEY="${WANDB_API_KEY}"
 export APPTAINERENV_WANDB_ENTITY="${WANDB_ENTITY}"
@@ -116,12 +119,12 @@ export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
 export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
 export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
 
-# Critical: point Python at the repo's vendored verl submodule first
-export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs/verl:/workspace/PettingLLMs:${PYTHONPATH:-}"
+# Point Python at mounted repo + vendored verl
+export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl:${PYTHONPATH:-}"
 
-# Avoid hf_transfer failure unless it's installed in the image
-export APPTAINERENV_HF_HUB_ENABLE_HF_TRANSFER=0
-
+# Force non-V1 vLLM in container environment
+export APPTAINERENV_VLLM_USE_V1=0
+export APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER=0
 
 ###############################################################################
 # Command run inside container
@@ -140,10 +143,21 @@ mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
 mkdir -p datasets
 
+echo "=== Mounted repo ==="
+pwd
+ls -lah .
+
+echo "=== Environment preflight ==="
 python3 - <<'PY'
+import os
 import traceback
 
-print("=== Version check ===")
+print("VLLM_USE_V1 =", os.environ.get("VLLM_USE_V1"))
+print("VLLM_USE_FLASHINFER_SAMPLER =", os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"))
+print("HF_HOME =", os.environ.get("HF_HOME"))
+print("PYTHONPATH =", os.environ.get("PYTHONPATH"))
+
+print("\\n=== Version check ===")
 try:
     import numpy, scipy, transformers
     print("numpy:", numpy.__version__, numpy.__file__)
@@ -153,7 +167,7 @@ except Exception:
     traceback.print_exc()
     raise SystemExit(1)
 
-print("\n=== sklearn import check ===")
+print("\\n=== sklearn import check ===")
 try:
     import importlib.util
     print("sklearn available:", importlib.util.find_spec("sklearn") is not None)
@@ -161,7 +175,7 @@ except Exception:
     traceback.print_exc()
     raise SystemExit(1)
 
-print("\n=== SciPy import check ===")
+print("\\n=== SciPy import check ===")
 try:
     from scipy.special import comb
     print("scipy.special OK")
@@ -169,7 +183,7 @@ except Exception:
     traceback.print_exc()
     raise SystemExit(1)
 
-print("\n=== Transformers import check ===")
+print("\\n=== Transformers import check ===")
 try:
     from transformers import AutoModelForCausalLM, GenerationMixin
     print("transformers imports OK")
@@ -177,7 +191,7 @@ except Exception:
     traceback.print_exc()
     raise SystemExit(1)
 
-print("\n=== verl import check ===")
+print("\\n=== verl import check ===")
 try:
     from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
     print("verl imports OK")
@@ -185,12 +199,6 @@ except Exception:
     traceback.print_exc()
     raise SystemExit(1)
 PY
-
-export APPTAINERENV_VLLM_USE_V1=0
-
-echo "=== Mounted repo ==="
-pwd
-ls -lah .
 
 echo "=== Dataset preparation ==="
 if [[ "${PREPARE_CODE_DATA}" == "1" ]]; then
@@ -211,16 +219,26 @@ ls -lah datasets/code || true
 ls -lah datasets/math || true
 ls -lah datasets/sudoku_environments || true
 
-# Force non-V1 vLLM at runtime
+echo "=== Training setup ==="
+
+# Force non-V1 vLLM in this shell too
 export VLLM_USE_V1=0
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-# Patch upstream script if it hardcodes V1
+# Patch upstream script if it hardcodes these values
 sed -i 's/^export VLLM_USE_V1=.*/export VLLM_USE_V1=0/' "${TRAIN_SCRIPT}" || true
 sed -i 's/^export VLLM_USE_FLASHINFER_SAMPLER=.*/export VLLM_USE_FLASHINFER_SAMPLER=0/' "${TRAIN_SCRIPT}" || true
 
-echo "VLLM_USE_V1 before training: $VLLM_USE_V1"
+# Patch placeholder model path if present
+sed -i 's|base_models.policy_0.path="your base model path"|base_models.policy_0.path="${MODEL_0}"|g' "${TRAIN_SCRIPT}" || true
+
+# Remove invalid Hydra override if still present
+sed -i 's|training.resample_freq=3\\\\||g' "${TRAIN_SCRIPT}" || true
+
+echo "Runtime VLLM_USE_V1=\${VLLM_USE_V1:-unset}"
+echo "Runtime VLLM_USE_FLASHINFER_SAMPLER=\${VLLM_USE_FLASHINFER_SAMPLER:-unset}"
 grep -n "VLLM_USE_V1" "${TRAIN_SCRIPT}" || true
+grep -n "VLLM_USE_FLASHINFER_SAMPLER" "${TRAIN_SCRIPT}" || true
 
 echo "=== Training ==="
 echo "Running: bash ${TRAIN_SCRIPT}"
