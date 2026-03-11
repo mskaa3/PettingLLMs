@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PETTINGLLMS_REPO=https://github.com/mskaa3/PettingLLMs.git
-ARG PETTINGLLMS_REF=main
+ARG PETTINGLLMS_REF=dev
 ARG TORCH_CUDA_ARCH_LIST=9.0
 
 ENV TZ=Etc/UTC \
@@ -15,7 +15,7 @@ ENV TZ=Etc/UTC \
     MAX_JOBS=8 \
     VLLM_ATTENTION_BACKEND=FLASH_ATTN \
     VLLM_USE_FLASHINFER_SAMPLER=0 \
-    VLLM_USE_V1=0 \
+    VLLM_USE_V1=1 \
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
@@ -68,11 +68,6 @@ RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} Pettin
     && git submodule update --init --recursive \
     && python -m pip install -r requirements_venv.txt \
     && rm -rf /tmp/build
-
-# Final compatibility override for this platform
-RUN python -m pip install --no-cache-dir --force-reinstall \
-    "numpy==1.26.4" \
-    "scipy==1.13.1"
 
 RUN python -m pip uninstall -y scikit-learn
 RUN python -m pip install torchdata

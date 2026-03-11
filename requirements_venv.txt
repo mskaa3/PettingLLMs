@@ -184,7 +184,7 @@ ninja==1.13.0
 nltk==3.9.1
 nodeenv==1.9.1
 numba==0.61.2
-numpy==1.26.4
+numpy==1.24.4
 nvidia-cublas-cu12==12.8.3.14
 nvidia-cuda-cupti-cu12==12.8.57
 nvidia-cuda-nvrtc-cu12==12.8.61
@@ -202,7 +202,7 @@ nvidia-nvshmem-cu12==3.3.20
 nvidia-nvtx-cu12==12.8.55
 oauthlib==3.3.1
 omegaconf==2.3.0
-openai==1.90.0
+openai
 opencv-python-headless==4.11.0.86
 opentelemetry-api==1.37.0
 opentelemetry-sdk==1.37.0
