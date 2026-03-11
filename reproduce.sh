@@ -106,7 +106,7 @@ export APPTAINERENV_HF_TOKEN="${HF_TOKEN}"
 export APPTAINERENV_HF_HOME="/tmp/tmpdir/huggingface"
 export APPTAINERENV_TRANSFORMERS_CACHE="/tmp/tmpdir/huggingface/transformers"
 export APPTAINERENV_HUGGINGFACE_HUB_CACHE="/tmp/tmpdir/huggingface/hub"
-export APPTAINERENV_HF_HUB_ENABLE_HF_TRANSFER=1
+export APPTAINERENV_HF_HUB_ENABLE_HF_TRANSFER=0
 
 export APPTAINERENV_WANDB_API_KEY="${WANDB_API_KEY}"
 export APPTAINERENV_WANDB_ENTITY="${WANDB_ENTITY}"
@@ -123,7 +123,7 @@ export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
 export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl:${PYTHONPATH:-}"
 
 # Force non-V1 vLLM in container environment
-export APPTAINERENV_VLLM_USE_V1=0
+export APPTAINERENV_VLLM_USE_V1=1
 export APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER=0
 
 ###############################################################################
@@ -142,6 +142,11 @@ mkdir -p /tmp/tmpdir/wandb/.config
 mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
 mkdir -p datasets
+
+# Add these to your APPTAINERENV exports
+export APPTAINERENV_VLLM_USE_V1=1
+export APPTAINERENV_VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export APPTAINERENV_RAY_DEDUP_LOGS=0
 
 echo "=== Mounted repo ==="
 pwd
@@ -222,11 +227,11 @@ ls -lah datasets/sudoku_environments || true
 echo "=== Training setup ==="
 
 # Force non-V1 vLLM in this shell too
-export VLLM_USE_V1=0
+export VLLM_USE_V1=1
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 # Patch upstream script if it hardcodes these values
-sed -i 's/^export VLLM_USE_V1=.*/export VLLM_USE_V1=0/' "${TRAIN_SCRIPT}" || true
+sed -i 's/^export VLLM_USE_V1=.*/export VLLM_USE_V1=1/' "${TRAIN_SCRIPT}" || true
 sed -i 's/^export VLLM_USE_FLASHINFER_SAMPLER=.*/export VLLM_USE_FLASHINFER_SAMPLER=0/' "${TRAIN_SCRIPT}" || true
 
 # Patch placeholder model path if present
