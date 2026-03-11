@@ -69,10 +69,6 @@ RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} Pettin
     && python -m pip install -r requirements_venv.txt \
     && rm -rf /tmp/build
 
-# Final compatibility override for this platform
-RUN python -m pip install --no-cache-dir --force-reinstall \
-    "numpy==1.26.4" \
-    "scipy==1.13.1"
 
 RUN python -m pip uninstall -y scikit-learn
 RUN python -m pip install torchdata
