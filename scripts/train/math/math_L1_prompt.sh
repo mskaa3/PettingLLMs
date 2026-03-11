@@ -19,7 +19,7 @@ export LD_LIBRARY_PATH=$CUDA_HOME/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH}
 
 
-GPU_num=1
+GPU_num="${GPU_num:-1}"
 
 
 model_0_config_path="models.model_0.ppo_trainer_config"

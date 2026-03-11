@@ -120,11 +120,6 @@ export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
 # Point Python at mounted repo + vendored verl
 export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl:${PYTHONPATH:-}"
 
-# Force non-V1 vLLM in container environment
-export APPTAINERENV_VLLM_USE_V1=1
-export APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER=0
-export APPTAINERENV_VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export APPTAINERENV_RAY_DEDUP_LOGS=0
 
 ###############################################################################
 # Command run inside container
@@ -169,23 +164,9 @@ ls -lah datasets/sudoku_environments || true
 
 echo "=== Training setup ==="
 
-export VLLM_USE_V1=1
-export VLLM_USE_FLASHINFER_SAMPLER=0
-
-# Patch upstream script if it hardcodes these values
-sed -i 's/^export VLLM_USE_V1=.*/export VLLM_USE_V1=1/' "${TRAIN_SCRIPT}" || true
-sed -i 's/^export VLLM_USE_FLASHINFER_SAMPLER=.*/export VLLM_USE_FLASHINFER_SAMPLER=0/' "${TRAIN_SCRIPT}" || true
-
 # Patch placeholder model path if present
 sed -i 's|base_models.policy_0.path="your base model path"|base_models.policy_0.path="${MODEL_0}"|g' "${TRAIN_SCRIPT}" || true
 
-# Remove invalid Hydra override if still present
-sed -i 's|training.resample_freq=3\\\\||g' "${TRAIN_SCRIPT}" || true
-
-echo "Runtime VLLM_USE_V1=\${VLLM_USE_V1:-unset}"
-echo "Runtime VLLM_USE_FLASHINFER_SAMPLER=\${VLLM_USE_FLASHINFER_SAMPLER:-unset}"
-grep -n "VLLM_USE_V1" "${TRAIN_SCRIPT}" || true
-grep -n "VLLM_USE_FLASHINFER_SAMPLER" "${TRAIN_SCRIPT}" || true
 
 echo "=== Training ==="
 echo "Running: bash ${TRAIN_SCRIPT}"
