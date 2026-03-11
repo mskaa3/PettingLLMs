@@ -2,7 +2,7 @@
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
 #SBATCH --cpus-per-gpu=2
-#SBATCH --time=8:00:00
+#SBATCH --time=2:00:00
 #SBATCH --mem=0
 #SBATCH -p lem-gpu-short
 #SBATCH --verbose
@@ -19,7 +19,6 @@ export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiG
 export PREPARE_CODE_DATA="${PREPARE_CODE_DATA:-0}"
 export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
 export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
-
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
 
 export HF_TOKEN="${HF_TOKEN:-}"
@@ -141,6 +140,54 @@ mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
 mkdir -p datasets
 
+python3 - <<'PY'
+import traceback
+
+print("=== Version check ===")
+try:
+    import numpy, scipy, transformers
+    print("numpy:", numpy.__version__, numpy.__file__)
+    print("scipy:", scipy.__version__, scipy.__file__)
+    print("transformers:", transformers.__version__, transformers.__file__)
+except Exception:
+    traceback.print_exc()
+    raise SystemExit(1)
+
+print("\n=== sklearn import check ===")
+try:
+    import importlib.util
+    print("sklearn available:", importlib.util.find_spec("sklearn") is not None)
+except Exception:
+    traceback.print_exc()
+    raise SystemExit(1)
+
+print("\n=== SciPy import check ===")
+try:
+    from scipy.special import comb
+    print("scipy.special OK")
+except Exception:
+    traceback.print_exc()
+    raise SystemExit(1)
+
+print("\n=== Transformers import check ===")
+try:
+    from transformers import AutoModelForCausalLM, GenerationMixin
+    print("transformers imports OK")
+except Exception:
+    traceback.print_exc()
+    raise SystemExit(1)
+
+print("\n=== verl import check ===")
+try:
+    from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
+    print("verl imports OK")
+except Exception:
+    traceback.print_exc()
+    raise SystemExit(1)
+PY
+
+export APPTAINERENV_VLLM_USE_V1=0
+
 echo "=== Mounted repo ==="
 pwd
 ls -lah .
@@ -163,6 +210,17 @@ ls -lah datasets || true
 ls -lah datasets/code || true
 ls -lah datasets/math || true
 ls -lah datasets/sudoku_environments || true
+
+# Force non-V1 vLLM at runtime
+export VLLM_USE_V1=0
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
+# Patch upstream script if it hardcodes V1
+sed -i 's/^export VLLM_USE_V1=.*/export VLLM_USE_V1=0/' "${TRAIN_SCRIPT}" || true
+sed -i 's/^export VLLM_USE_FLASHINFER_SAMPLER=.*/export VLLM_USE_FLASHINFER_SAMPLER=0/' "${TRAIN_SCRIPT}" || true
+
+echo "VLLM_USE_V1 before training: $VLLM_USE_V1"
+grep -n "VLLM_USE_V1" "${TRAIN_SCRIPT}" || true
 
 echo "=== Training ==="
 echo "Running: bash ${TRAIN_SCRIPT}"
