@@ -1,4 +1,4 @@
-FROM nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PETTINGLLMS_REPO=https://github.com/mskaa3/PettingLLMs.git
@@ -15,7 +15,7 @@ ENV TZ=Etc/UTC \
     MAX_JOBS=8 \
     VLLM_ATTENTION_BACKEND=FLASH_ATTN \
     VLLM_USE_FLASHINFER_SAMPLER=0 \
-    VLLM_USE_V1=1 \
+    VLLM_USE_V1=0 \
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
