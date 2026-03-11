@@ -10,9 +10,7 @@
 
 set -euo pipefail
 
-###############################################################################
-# User settings
-###############################################################################
+
 export SIF_S3="${SIF_S3:-s3min-tomasznaskret-1712063354/user/jmoska/stronger_mas.sif}"
 export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiGRPO/output/}"
 
@@ -125,6 +123,8 @@ export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/ve
 # Force non-V1 vLLM in container environment
 export APPTAINERENV_VLLM_USE_V1=1
 export APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER=0
+export APPTAINERENV_VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export APPTAINERENV_RAY_DEDUP_LOGS=0
 
 ###############################################################################
 # Command run inside container
@@ -143,67 +143,10 @@ mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
 mkdir -p datasets
 
-# Add these to your APPTAINERENV exports
-export APPTAINERENV_VLLM_USE_V1=1
-export APPTAINERENV_VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export APPTAINERENV_RAY_DEDUP_LOGS=0
 
 echo "=== Mounted repo ==="
 pwd
 ls -lah .
-
-echo "=== Environment preflight ==="
-python3 - <<'PY'
-import os
-import traceback
-
-print("VLLM_USE_V1 =", os.environ.get("VLLM_USE_V1"))
-print("VLLM_USE_FLASHINFER_SAMPLER =", os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"))
-print("HF_HOME =", os.environ.get("HF_HOME"))
-print("PYTHONPATH =", os.environ.get("PYTHONPATH"))
-
-print("\\n=== Version check ===")
-try:
-    import numpy, scipy, transformers
-    print("numpy:", numpy.__version__, numpy.__file__)
-    print("scipy:", scipy.__version__, scipy.__file__)
-    print("transformers:", transformers.__version__, transformers.__file__)
-except Exception:
-    traceback.print_exc()
-    raise SystemExit(1)
-
-print("\\n=== sklearn import check ===")
-try:
-    import importlib.util
-    print("sklearn available:", importlib.util.find_spec("sklearn") is not None)
-except Exception:
-    traceback.print_exc()
-    raise SystemExit(1)
-
-print("\\n=== SciPy import check ===")
-try:
-    from scipy.special import comb
-    print("scipy.special OK")
-except Exception:
-    traceback.print_exc()
-    raise SystemExit(1)
-
-print("\\n=== Transformers import check ===")
-try:
-    from transformers import AutoModelForCausalLM, GenerationMixin
-    print("transformers imports OK")
-except Exception:
-    traceback.print_exc()
-    raise SystemExit(1)
-
-print("\\n=== verl import check ===")
-try:
-    from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker
-    print("verl imports OK")
-except Exception:
-    traceback.print_exc()
-    raise SystemExit(1)
-PY
 
 echo "=== Dataset preparation ==="
 if [[ "${PREPARE_CODE_DATA}" == "1" ]]; then
@@ -226,7 +169,6 @@ ls -lah datasets/sudoku_environments || true
 
 echo "=== Training setup ==="
 
-# Force non-V1 vLLM in this shell too
 export VLLM_USE_V1=1
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
@@ -269,9 +211,6 @@ if [[ -d "$RUN_ROOT/output" ]]; then
   rclone copy --progress "$RUN_ROOT/output" "s3v2:$S3_OUTPUT/${SLURM_JOB_ID}/"
 fi
 
-###############################################################################
-# Cleanup
-###############################################################################
 if [[ -n "${RUN_ROOT:-}" && -d "$RUN_ROOT" ]]; then
   rm -rf "$RUN_ROOT"
 fi
