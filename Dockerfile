@@ -69,8 +69,49 @@ RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} Pettin
     && python -m pip install -r requirements_venv.txt \
     && rm -rf /tmp/build
 
+# Final compatibility override for this platform
+RUN python -m pip install --no-cache-dir --force-reinstall \
+    "numpy==1.26.4" \
+    "scipy==1.13.1"
+
 RUN python -m pip uninstall -y scikit-learn
 RUN python -m pip install torchdata
+
+RUN python - <<'PY'
+import inspect
+import re
+from pathlib import Path
+import vllm.v1.worker.gpu_model_runner as mod
+
+p = Path(inspect.getfile(mod))
+src = p.read_text()
+
+pattern = re.compile(
+    r"(?m)^(\s*)logit_indices = np\.cumsum\(num_scheduled_tokens\) - 1\n"
+    r"\1return hidden_states, hidden_states\[logit_indices\]"
+)
+
+replacement = (
+    r"\1logit_indices = np.cumsum(num_scheduled_tokens) - 1\n"
+    r"\1logit_indices_device = torch.tensor(logit_indices.tolist(), dtype=torch.long, device=self.device)\n"
+    r"\1return hidden_states, hidden_states[logit_indices_device]"
+)
+
+new_src, count = pattern.subn(replacement, src, count=1)
+
+if count == 0:
+    print(f"Patch target not found in {p}")
+    for needle in [
+        "logit_indices = np.cumsum(num_scheduled_tokens) - 1",
+        "hidden_states[logit_indices]",
+        "logit_indices_device = torch.from_numpy(logit_indices).to(",
+    ]:
+        print(f"{needle!r}: {needle in src}")
+    raise SystemExit(1)
+
+p.write_text(new_src)
+print(f"Patched {p} ({count} occurrence(s))")
+PY
 
 
 WORKDIR /workspace/PettingLLMs
