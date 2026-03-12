@@ -53,7 +53,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --upgrade pip setuptools wheel
 
 RUN python -m pip install \
-    torch==2.7.1 \
+    torch==2.7.0 \
     torchvision==0.22.1 \
     torchaudio==2.7.1 \
     --index-url https://download.pytorch.org/whl/cu128

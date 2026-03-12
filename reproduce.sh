@@ -118,7 +118,8 @@ export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
 export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
 
 # Point Python at mounted repo + vendored verl
-export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl:${PYTHONPATH:-}"
+export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl"
+export APPTAINERENV_PYTHONNOUSERSITE=1
 
 
 ###############################################################################
@@ -163,6 +164,10 @@ ls -lah datasets/math || true
 ls -lah datasets/sudoku_environments || true
 
 echo "=== Training setup ==="
+
+unset PYTHONPATH
+export PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl"
+export PYTHONNOUSERSITE=1
 
 # Patch placeholder model path if present
 sed -i 's|base_models.policy_0.path="your base model path"|base_models.policy_0.path="${MODEL_0}"|g' "${TRAIN_SCRIPT}" || true
