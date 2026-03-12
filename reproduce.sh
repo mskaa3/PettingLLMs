@@ -24,7 +24,7 @@ export MODEL_0="${MODEL_0:-Qwen/Qwen3-1.7B}"
 export HF_TOKEN="${HF_TOKEN:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_ENTITY="${WANDB_ENTITY:-moska-phd-research}"
-export WANDB_PROJECT="${WANDB_PROJECT:-pettingllms-quickstart}"
+export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
 export WANDB_NAME="${WANDB_NAME:-first_run}"
 
 ###############################################################################

@@ -60,6 +60,7 @@ multi_agent_interaction:
 training:
   device: cuda
   total_training_steps: 200
+  entity: pettingllms
   project_name: pettingllms
   experiment_name: math_eval_single_policy
   logger:

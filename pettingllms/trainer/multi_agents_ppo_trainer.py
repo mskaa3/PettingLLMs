@@ -547,6 +547,7 @@ class MultiAgentsPPOTrainer:
             project_name=self.config.training.project_name,
             experiment_name=experiment_name,
             default_backend=self.config.training.logger,
+            entity=self.config.training.entity,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
         

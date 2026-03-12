@@ -29,6 +29,8 @@ model_0_resource="resource.n_gpus_per_node=$GPU_num  $model_0_config_path.traine
 python3 -m pettingllms.trainer.train --config-path ../config/math --config-name math_L1_prompt \
     $model_0_resource \
     base_models.policy_0.path="Qwen/Qwen3-1.7B"\
+    training.project_name=multi-grpo\
+    training.entity=moska-phd-research\
     training.experiment_name=math_1.7B_prompt\
     training.total_training_steps=200\
     training.train_batch_size=32\
