@@ -570,8 +570,8 @@ def main():
     project_root = Path(__file__).resolve().parents[2]
     
     # Create train and test directories
-    train_dir = project_root / "datasets" / "code" / "train"
-    test_dir = project_root / "datasets" / "code" / "test"
+    train_dir = project_root / "data" / "code" / "train"
+    test_dir = project_root / "data" / "code" / "test"
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(test_dir, exist_ok=True)
     print(f"train_dir: {train_dir}")

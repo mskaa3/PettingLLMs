@@ -96,8 +96,8 @@ def standardize_hf_dataset(ds, q_keys, a_keys):
 
 def main():
     project_root = Path(__file__).resolve().parents[2]
-    out_train_dir = project_root / "datasets" / "math" / "train"
-    out_test_dir = project_root / "datasets" / "math" / "test"
+    out_train_dir = project_root / "data" / "math" / "train"
+    out_test_dir = project_root / "data" / "math" / "test"
     os.makedirs(out_train_dir, exist_ok=True)
     os.makedirs(out_test_dir, exist_ok=True)
 
