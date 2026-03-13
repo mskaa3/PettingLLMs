@@ -31,49 +31,46 @@ export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
 export WANDB_NAME="${WANDB_NAME:-first_run}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 
-# 1 = use repo cloned on HPC and mount it into container
-# 0 = use repo baked into image
-export USE_HOST_REPO="${USE_HOST_REPO:-1}"
-
-# Paths inside the container image
+# Mode B constants
 export CONTAINER_REPO_DIR="${CONTAINER_REPO_DIR:-/workspace/PettingLLMs}"
 export IMAGE_PYTHON="${IMAGE_PYTHON:-/opt/venv/bin/python}"
 
 ###############################################################################
 # Repo location on host
 ###############################################################################
-REPO_MOUNT_ARGS=()
+START_DIR="${HOST_REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+HOST_REPO_DIR="$START_DIR"
 
-if [[ "${USE_HOST_REPO}" == "1" ]]; then
-  START_DIR="${HOST_REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
-  HOST_REPO_DIR="$START_DIR"
-
-  while [[ "$HOST_REPO_DIR" != "/" ]]; do
-    if [[ -f "$HOST_REPO_DIR/requirements_venv.txt" && \
-          -d "$HOST_REPO_DIR/pettingllms" && \
-          -d "$HOST_REPO_DIR/scripts" ]]; then
-      break
-    fi
-    HOST_REPO_DIR="$(dirname "$HOST_REPO_DIR")"
-  done
-
-  if [[ "$HOST_REPO_DIR" == "/" ]]; then
-    echo "ERROR: Could not locate repo root from start dir: $START_DIR"
-    echo "Tip: run 'sbatch' from the repo root, or set HOST_REPO_DIR explicitly."
-    exit 1
+while [[ "$HOST_REPO_DIR" != "/" ]]; do
+  if [[ -f "$HOST_REPO_DIR/requirements_venv.txt" && \
+        -d "$HOST_REPO_DIR/pettingllms" && \
+        -d "$HOST_REPO_DIR/scripts" && \
+        -d "$HOST_REPO_DIR/verl" ]]; then
+    break
   fi
+  HOST_REPO_DIR="$(dirname "$HOST_REPO_DIR")"
+done
 
-  if [[ ! -f "$HOST_REPO_DIR/$TRAIN_SCRIPT" ]]; then
-    echo "ERROR: Training script not found: $HOST_REPO_DIR/$TRAIN_SCRIPT"
-    exit 1
-  fi
-
-  export HOST_REPO_DIR
-  echo "Using host repo: $HOST_REPO_DIR"
-  REPO_MOUNT_ARGS=(--mount "type=bind,src=$HOST_REPO_DIR,dst=$CONTAINER_REPO_DIR")
-else
-  echo "Using repo baked into image at: $CONTAINER_REPO_DIR"
+if [[ "$HOST_REPO_DIR" == "/" ]]; then
+  echo "ERROR: Could not locate repo root from start dir: $START_DIR"
+  echo "Tip: run 'sbatch' from the repo root, or set HOST_REPO_DIR explicitly."
+  exit 1
 fi
+
+if [[ ! -f "$HOST_REPO_DIR/$TRAIN_SCRIPT" ]]; then
+  echo "ERROR: Training script not found: $HOST_REPO_DIR/$TRAIN_SCRIPT"
+  exit 1
+fi
+
+if [[ ! -d "$HOST_REPO_DIR/verl/verl" ]]; then
+  echo "ERROR: Host repo does not have initialized submodules."
+  echo "Run: git submodule update --init --recursive"
+  exit 1
+fi
+
+export HOST_REPO_DIR
+echo "Using host repo: $HOST_REPO_DIR"
+ls -lah "$HOST_REPO_DIR"
 
 ###############################################################################
 # Scratch layout
@@ -120,6 +117,7 @@ export APPTAINER_CACHEDIR="$LOCAL_APPTAINER_CACHE"
 ###############################################################################
 export APPTAINERENV_HOME="/tmp/tmpdir/home"
 export APPTAINERENV_TMPDIR="/tmp/tmpdir"
+export APPTAINERENV_PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export APPTAINERENV_PYTHONNOUSERSITE=1
 export APPTAINERENV_PYTHONPATH="${CONTAINER_REPO_DIR}:${CONTAINER_REPO_DIR}/verl"
 export APPTAINERENV_IMAGE_PYTHON="${IMAGE_PYTHON}"
@@ -128,7 +126,9 @@ export APPTAINERENV_CONTAINER_REPO_DIR="${CONTAINER_REPO_DIR}"
 export APPTAINERENV_GPU_num="${GPU_num}"
 export APPTAINERENV_MODEL_0="${MODEL_0}"
 export APPTAINERENV_TRAIN_SCRIPT="${TRAIN_SCRIPT}"
-
+export APPTAINERENV_PREPARE_CODE_DATA="${PREPARE_CODE_DATA}"
+export APPTAINERENV_PREPARE_MATH_DATA="${PREPARE_MATH_DATA}"
+export APPTAINERENV_PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA}"
 
 export APPTAINERENV_HF_TOKEN="${HF_TOKEN}"
 export APPTAINERENV_HF_HOME="/tmp/tmpdir/huggingface"
@@ -148,11 +148,24 @@ export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
 export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
 export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
 
+export APPTAINERENV_VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}"
+export APPTAINERENV_VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+export APPTAINERENV_VLLM_USE_V1="${VLLM_USE_V1:-1}"
+export APPTAINERENV_VLLM_ALLOW_LONG_MAX_MODEL_LEN="${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-1}"
+export APPTAINERENV_PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}"
+export APPTAINERENV_TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
+export APPTAINERENV_NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export APPTAINERENV_NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-0}"
+
 ###############################################################################
 # Command run inside container
 ###############################################################################
 COMMAND=$(cat <<'BASH_EOF'
 set -euo pipefail
+
+export PATH="/opt/venv/bin:$PATH"
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="${CONTAINER_REPO_DIR}:${CONTAINER_REPO_DIR}/verl${PYTHONPATH:+:${PYTHONPATH}}"
 
 cd "${CONTAINER_REPO_DIR}"
 
@@ -164,33 +177,39 @@ mkdir -p /tmp/tmpdir/wandb/.cache
 mkdir -p /tmp/tmpdir/wandb/.config
 mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
-mkdir -p datasets
+mkdir -p data
 
 echo "=== Runtime paths ==="
 echo "PWD: $(pwd)"
-echo "TRAIN_SCRIPT: ${TRAIN_SCRIPT}"
+echo "HOST TRAIN_SCRIPT: ${TRAIN_SCRIPT}"
 echo "MODEL_0: ${MODEL_0}"
 echo "GPU_num: ${GPU_num}"
 echo "WANDB_PROJECT: ${WANDB_PROJECT}"
 echo "WANDB_ENTITY: ${WANDB_ENTITY}"
 echo "WANDB_NAME: ${WANDB_NAME}"
 echo "WANDB_MODE: ${WANDB_MODE}"
+echo "PATH: ${PATH}"
+echo "PYTHONPATH: ${PYTHONPATH}"
 ls -lah .
 
 echo "=== Python preflight ==="
-echo "IMAGE_PYTHON=${IMAGE_PYTHON}"
+which python
+python -V
 "${IMAGE_PYTHON}" -V
-"${IMAGE_PYTHON}" - <<'PY'
+
+python - <<'PY'
 import sys
 import numpy as np
 import numpy.core.multiarray as ma
 import torch
 import vllm
+import datasets
 
 print("sys.executable:", sys.executable)
 print("numpy:", np.__version__, np.__file__)
 print("torch:", torch.__version__)
 print("vllm:", vllm.__version__)
+print("datasets:", datasets.__version__)
 print("numpy.core.multiarray.generic:", hasattr(ma, "generic"))
 print("numpy.core.multiarray.complexfloating:", hasattr(ma, "complexfloating"))
 
@@ -202,50 +221,50 @@ PY
 
 echo "=== Dataset preparation ==="
 if [[ "${PREPARE_CODE_DATA}" == "1" ]]; then
-  "${IMAGE_PYTHON}" scripts/dataprocess/load_code.py
+  python scripts/dataprocess/load_code.py
 fi
 
 if [[ "${PREPARE_MATH_DATA}" == "1" ]]; then
-  "${IMAGE_PYTHON}" scripts/dataprocess/load_math.py
+  python scripts/dataprocess/load_math.py
 fi
 
 if [[ "${PREPARE_SOKOBAN_DATA}" == "1" ]]; then
-  "${IMAGE_PYTHON}" scripts/dataprocess/load_sokoban.py
+  python scripts/dataprocess/load_sokoban.py
 fi
 
 echo "=== Dataset directories after preparation ==="
-ls -lah datasets || true
-ls -lah datasets/code || true
-ls -lah datasets/math || true
-ls -lah datasets/sudoku_environments || true
+ls -lah data || true
+ls -lah data/code || true
+ls -lah data/math || true
+ls -lah data/sudoku_environments || true
 
 echo "=== Prepare runtime training script copy ==="
 RUNTIME_TRAIN_SCRIPT="/tmp/tmpdir/$(basename "${TRAIN_SCRIPT}")"
+export RUNTIME_TRAIN_SCRIPT
 cp "${TRAIN_SCRIPT}" "${RUNTIME_TRAIN_SCRIPT}"
 chmod +x "${RUNTIME_TRAIN_SCRIPT}"
 
-# Patch only the runtime copy, never the host repo file
-"${IMAGE_PYTHON}" - <<'PY'
+python - <<'PY'
 import os
 import re
 from pathlib import Path
 
-p = Path(f"/tmp/tmpdir/{Path(os.environ['TRAIN_SCRIPT']).name}")
-text = p.read_text()
+p = Path(os.environ["RUNTIME_TRAIN_SCRIPT"])
+src = p.read_text()
 
-replacements = [
-    (r'base_models\.policy_0\.path="[^"]*"', f'base_models.policy_0.path="{os.environ["MODEL_0"]}"'),
-    (r'training\.project_name=[^\\\s]+', f'training.project_name={os.environ["WANDB_PROJECT"]}'),
-    (r'training\.entity=[^\\\s]+', f'training.entity={os.environ["WANDB_ENTITY"]}'),
-    (r'training\.experiment_name=[^\\\s]+', f'training.experiment_name={os.environ["WANDB_NAME"]}'),
-]
+changes = {}
 
-for pattern, replacement in replacements:
-    text = re.sub(pattern, replacement, text)
+def sub_once(pattern, repl, label, flags=0):
+    global src
+    new_src, n = re.subn(pattern, repl, src, count=1, flags=flags)
+    changes[label] = n
+    src = new_src
 
-p.write_text(text)
-print(f"Prepared runtime script: {p}")
-PY
+# Use the image venv python, not system python
+sub_once(r'\bpython3\s+-m\s+', 'python -m ', 'python3->python')
+
+# Do not let upstream script collapse visibility to a single GPU
+sub_once(r'export CUDA_VISIBLE_DEVICES=0\s*', '', 'drop CUDA_VISIBLE_DEVICES=0')
 
 echo "=== Runtime training script ==="
 cat "${RUNTIME_TRAIN_SCRIPT}"
@@ -261,7 +280,7 @@ BASH_EOF
 ###############################################################################
 srun apptainer exec --nv --cleanenv \
   --mount "type=bind,src=$RUN_ROOT,dst=/tmp/tmpdir" \
-  "${REPO_MOUNT_ARGS[@]}" \
+  --mount "type=bind,src=$HOST_REPO_DIR,dst=$CONTAINER_REPO_DIR" \
   "$LOCAL_SIF" \
   bash -lc "$COMMAND"
 
