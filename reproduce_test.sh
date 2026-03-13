@@ -265,6 +265,7 @@ sub_once(r'\bpython3\s+-m\s+', 'python -m ', 'python3->python')
 
 # Do not let upstream script collapse visibility to a single GPU
 sub_once(r'export CUDA_VISIBLE_DEVICES=0\s*', '', 'drop CUDA_VISIBLE_DEVICES=0')
+PY
 
 echo "=== Runtime training script ==="
 cat "${RUNTIME_TRAIN_SCRIPT}"
