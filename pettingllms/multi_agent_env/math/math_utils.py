@@ -74,7 +74,7 @@ def load_math_problem_batch(
     
 
     current_dir = Path(__file__).parent.parent.parent.parent
-    local_datasets_dir = current_dir / "datasets" / "math"
+    local_datasets_dir = current_dir / "data" / "math"
     
     if mode == "train":
         parquet_file = local_datasets_dir /"train" /f"{dataset_name}.parquet"

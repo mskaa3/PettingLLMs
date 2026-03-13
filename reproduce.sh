@@ -137,7 +137,7 @@ mkdir -p /tmp/tmpdir/wandb/.cache
 mkdir -p /tmp/tmpdir/wandb/.config
 mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
-mkdir -p datasets
+mkdir -p data
 
 
 echo "=== Mounted repo ==="
@@ -158,10 +158,10 @@ if [[ "${PREPARE_SOKOBAN_DATA}" == "1" ]]; then
 fi
 
 echo "=== Dataset directories after preparation ==="
-ls -lah datasets || true
-ls -lah datasets/code || true
-ls -lah datasets/math || true
-ls -lah datasets/sudoku_environments || true
+ls -lah data || true
+ls -lah data/code || true
+ls -lah data/math || true
+ls -lah data/sudoku_environments || true
 
 echo "=== Training setup ==="
 
