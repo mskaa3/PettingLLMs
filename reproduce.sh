@@ -10,6 +10,19 @@
 
 set -euo pipefail
 
+echo "=== Python diagnostics ==="
+which python || true
+python -V || true
+python - <<'PY'
+import sys
+print("sys.executable:", sys.executable)
+print("sys.path[0:5]:", sys.path[:5])
+try:
+    import datasets
+    print("datasets OK:", datasets.__version__, datasets.__file__)
+except Exception as e:
+    print("datasets import failed:", repr(e))
+PY
 
 export SIF_S3="${SIF_S3:-s3min-tomasznaskret-1712063354/user/jmoska/stronger_mas.sif}"
 export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiGRPO/output/}"

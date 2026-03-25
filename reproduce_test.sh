@@ -2,11 +2,11 @@
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
 #SBATCH --cpus-per-gpu=2
-#SBATCH --time=2:00:00
+#SBATCH --time=8:00:00
 #SBATCH --mem=0
 #SBATCH -p lem-gpu-short
 #SBATCH --verbose
-#SBATCH --gres=gpu:hopper:2
+#SBATCH --gres=gpu:hopper:1
 
 set -euo pipefail
 
