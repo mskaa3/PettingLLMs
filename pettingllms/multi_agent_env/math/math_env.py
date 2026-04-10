@@ -25,6 +25,13 @@ class MathEnvState:
     code_generated_solution_history: List = field(default_factory=list)
     reasoning_extracted_answer_history: List = field(default_factory=list)
     code_extracted_answer_history: List =field(default_factory=list)
+    n_agents: int = 4
+    agent_pool: List = field(default_factory=list)
+    decomposition: Dict = field(default_factory=dict)
+    team_spec: Dict = field(default_factory=dict)
+    graph_execution_result: Dict = field(default_factory=dict)
+    graph_execution_error: str = None
+    final_reward: float = 0.0
 class MathEnv(Env):
     """
     Environment for mathematical problem solving tasks with single-agent interaction.
@@ -47,6 +54,8 @@ class MathEnv(Env):
         self.state = MathEnvState()
 
     def reset(self):
+        prev_n_agents = int(getattr(self.state, "n_agents", 4) or 4)
+        prev_agent_pool = list(getattr(self.state, "agent_pool", []) or [])
         self.state.reasoning_generated_solution = None
         self.state.code_generated_solution = None
         self.state.reasoning_extracted_answer = None
@@ -58,6 +67,13 @@ class MathEnv(Env):
         self.state.code_generated_solution_history = []
         self.state.reasoning_extracted_answer_history = []
         self.state.code_extracted_answer_history = []
+        self.state.n_agents = max(1, prev_n_agents)
+        self.state.agent_pool = prev_agent_pool if prev_agent_pool else [f"agent_{i}" for i in range(1, self.state.n_agents + 1)]
+        self.state.decomposition = {}
+        self.state.team_spec = {}
+        self.state.graph_execution_result = {}
+        self.state.graph_execution_error = None
+        self.state.final_reward = 0.0
 
 
 class MathEnvBatch:
@@ -66,6 +82,9 @@ class MathEnvBatch:
         safe_env_indices = list(env_indices) if not isinstance(env_indices, list) else env_indices
 
         benchmark_name=getattr(config.env,"benchmark") if hasattr(config,"env") and hasattr(config.env,"benchmark") else "AIME24"
+        n_agents = int(getattr(config.env, "n_agents", 4)) if hasattr(config, "env") else 4
+        n_agents = max(1, n_agents)
+        agent_pool = [f"agent_{i}" for i in range(1, n_agents + 1)]
 
         # For validate mode, load all problems from the dataset
         # For train mode, use the provided env_indices
@@ -88,6 +107,8 @@ class MathEnvBatch:
             state = MathEnvState(
                 problem=problem["question"],
                 ground_truth_answer=problem["solution"],
+                n_agents=n_agents,
+                agent_pool=copy.deepcopy(agent_pool),
             )
             for s in range(samples):
                 env = MathEnv(env_idx=i, rollout_idx=rollout_idx_list[i*samples+s], max_turns=max_turns, config=None)

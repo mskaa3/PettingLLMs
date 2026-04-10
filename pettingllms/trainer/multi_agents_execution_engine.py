@@ -221,6 +221,35 @@ class MultiAgentsExecutionEngine:
     
                    
             
+    def _inject_runtime_context_if_supported(self, agent):
+        if not hasattr(agent, "set_runtime_context"):
+            return
+        try:
+            agent.set_runtime_context(
+                server_address_dict=self.server_address_dict,
+                tokenizer_dict=self.tokenizer_dict,
+                ppo_trainer_config_dict=self.ppo_trainer_config_dict,
+                processor_dict=self.processor_dict,
+                agent_policy_mapping=self.agent_policy_mapping,
+                agent_lora_mapping=self.agent_lora_mapping,
+                agent_config_dict=self.agent_config_dict,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to inject runtime context into agent {type(agent).__name__}: {e}")
+
+    def _append_policy_dataproto(self, trajectory_per_task_dict, policy_name, output_dpr):
+        if output_dpr is None or getattr(output_dpr, "batch", None) is None:
+            return
+        if policy_name not in trajectory_per_task_dict:
+            trajectory_per_task_dict[policy_name] = DataProto()
+        if trajectory_per_task_dict[policy_name].batch is None:
+            trajectory_per_task_dict[policy_name] = output_dpr
+        else:
+            trajectory_per_task_dict[policy_name] = DataProto.concat([
+                trajectory_per_task_dict[policy_name],
+                output_dpr
+            ])
+
     async def generate_single_rollout(self, rollout_idx):
         """
         Generate a single rollout, adapted for multi-agent interaction in the code testing environment.
@@ -386,6 +415,8 @@ class MultiAgentsExecutionEngine:
                         self.envs[rollout_idx].state.assigned_worker_id = env_worker_id
                         self.envs[rollout_idx].state.gpu_group_id = self.gpu_group_id
 
+                    self._inject_runtime_context_if_supported(current_agent)
+
                     await asyncio.wait_for(
                         current_agent.step(self.envs[rollout_idx], env_worker=env_worker),
                         timeout=self.step_timeout
@@ -426,18 +457,23 @@ class MultiAgentsExecutionEngine:
                         lora_ids = [self.agent_lora_mapping[agent_name]] * batch_size
                         output_dpr.non_tensor_batch["lora_ids"] = np.array(lora_ids, dtype=object)
                 
-                    if trajectory_per_task_dict[policy_name].batch is None:
-                        # If empty, assign directly
-                        trajectory_per_task_dict[policy_name] = output_dpr
-                    else:
-                        try:
-                            trajectory_per_task_dict[policy_name] = DataProto.concat([
-                                trajectory_per_task_dict[policy_name],
-                                output_dpr
-                            ])
-                        except Exception as e:
-                            if _DEBUG_ENGINE:
-                                print(f"The length of concatenated trajectory_per_task_dict[policy_name]: {len(trajectory_per_task_dict[policy_name])}")
+                    try:
+                        self._append_policy_dataproto(trajectory_per_task_dict, policy_name, output_dpr)
+                    except Exception as e:
+                        if _DEBUG_ENGINE:
+                            print(f"The length of concatenated trajectory_per_task_dict[policy_name]: {len(trajectory_per_task_dict[policy_name])}")
+
+                extra_trajectory_per_policy = getattr(current_agent, "extra_trajectory_per_policy", None)
+                if isinstance(extra_trajectory_per_policy, dict) and extra_trajectory_per_policy:
+                    for extra_policy_name, extra_dprs in extra_trajectory_per_policy.items():
+                        if not isinstance(extra_dprs, list):
+                            extra_dprs = [extra_dprs]
+                        for extra_dpr in extra_dprs:
+                            try:
+                                self._append_policy_dataproto(trajectory_per_task_dict, extra_policy_name, extra_dpr)
+                            except Exception as e:
+                                logger.warning(f"Failed to append extra trajectory for policy {extra_policy_name}: {e}")
+                    current_agent.extra_trajectory_per_policy = {}
                 
                 # Use captured state snapshot for this specific agent
                 env_state_compact = agent_output.get('env_state_snapshot') or (env.state.to_dict_compact(agent_name=agent_name) if hasattr(env.state, 'to_dict_compact') else env.state)
@@ -743,6 +779,8 @@ class MultiAgentsExecutionEngine:
                         self.envs[rollout_idx_list[idx]].state.assigned_worker_id = env_worker_id
                         self.envs[rollout_idx_list[idx]].state.gpu_group_id = self.gpu_group_id
 
+                    self._inject_runtime_context_if_supported(current_agent)
+
                     try:
                         await asyncio.wait_for(
                             current_agent.step(self.envs[rollout_idx_list[idx]], env_worker=env_worker),
@@ -788,13 +826,19 @@ class MultiAgentsExecutionEngine:
                             lora_ids = [self.agent_lora_mapping[agent_name]] * batch_size
                             output_dpr.non_tensor_batch["lora_ids"] = np.array(lora_ids, dtype=object)
                         
-                        if trajectory_per_task_dict[policy_name].batch is None:
-                            trajectory_per_task_dict[policy_name] = output_dpr
-                        else:
-                            trajectory_per_task_dict[policy_name] = DataProto.concat([
-                                trajectory_per_task_dict[policy_name], 
-                                output_dpr
-                            ])
+                        self._append_policy_dataproto(trajectory_per_task_dict, policy_name, output_dpr)
+
+                    extra_trajectory_per_policy = getattr(current_agent, "extra_trajectory_per_policy", None)
+                    if isinstance(extra_trajectory_per_policy, dict) and extra_trajectory_per_policy:
+                        for extra_policy_name, extra_dprs in extra_trajectory_per_policy.items():
+                            if not isinstance(extra_dprs, list):
+                                extra_dprs = [extra_dprs]
+                            for extra_dpr in extra_dprs:
+                                try:
+                                    self._append_policy_dataproto(trajectory_per_task_dict, extra_policy_name, extra_dpr)
+                                except Exception as e:
+                                    logger.warning(f"Failed to append extra trajectory for policy {extra_policy_name}: {e}")
+                        current_agent.extra_trajectory_per_policy = {}
                 
                 rollout_score_idx = []
                 for idx in range(len(rollout_idx_list)):
@@ -965,6 +1009,3 @@ class MultiAgentsExecutionEngine:
 
         sys.stdout.flush()
         return aggregated_results
-
-
-

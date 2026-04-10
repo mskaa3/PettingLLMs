@@ -1,8 +1,6 @@
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PETTINGLLMS_REPO=https://github.com/mskaa3/PettingLLMs.git
-ARG PETTINGLLMS_REF=dev
 ARG TORCH_CUDA_ARCH_LIST=9.0
 ARG MAX_JOBS=8
 
@@ -25,9 +23,9 @@ ENV TZ=Etc/UTC \
     NCCL_NET_GDR_LEVEL=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-dev \
-    python3-venv \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
     python3-pip \
     python-is-python3 \
     build-essential \
@@ -45,58 +43,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     unzip \
     wget \
-    && curl -fsSL https://rclone.org/install.sh | bash \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace/PettingLLMs
+WORKDIR /opt/PettingLLMs-build
 
-RUN git clone --recursive --branch ${PETTINGLLMS_REF} ${PETTINGLLMS_REPO} . \
-    && git submodule update --init --recursive \
-    && bash setup.bash
+COPY . .
 
-ENV PATH="/workspace/PettingLLMs/pettingllms_venv/bin:${PATH}"
+RUN bash setup.bash
 
-RUN pip uninstall -y scikit-learn || true \
-    && pip install torchdata
-
-# Optional: only add your vLLM patch after the baseline image builds cleanly
-# RUN python - <<'PY'
-# ...your vllm patch here...
-# PY
-RUN python - <<'PY'
-import inspect
-import re
-from pathlib import Path
-import vllm.v1.worker.gpu_model_runner as mod
-
-p = Path(inspect.getfile(mod))
-src = p.read_text()
-
-pattern = re.compile(
-    r"(?m)^(\s*)logit_indices = np\.cumsum\(num_scheduled_tokens\) - 1\n"
-    r"\1return hidden_states, hidden_states\[logit_indices\]"
-)
-
-replacement = (
-    r"\1logit_indices = np.cumsum(num_scheduled_tokens) - 1\n"
-    r"\1logit_indices_device = torch.tensor(logit_indices.tolist(), dtype=torch.long, device=self.device)\n"
-    r"\1return hidden_states, hidden_states[logit_indices_device]"
-)
-
-new_src, count = pattern.subn(replacement, src, count=1)
-
-if count == 0:
-    print(f"Patch target not found in {p}")
-    for needle in [
-        "logit_indices = np.cumsum(num_scheduled_tokens) - 1",
-        "hidden_states[logit_indices]",
-        "logit_indices_device = torch.from_numpy(logit_indices).to(",
-    ]:
-        print(f"{needle!r}: {needle in src}")
-    raise SystemExit(1)
-
-p.write_text(new_src)
-print(f"Patched {p} ({count} occurrence(s))")
-PY
+ENV PATH="/opt/PettingLLMs-build/pettingllms_venv/bin:${PATH}"
 
 WORKDIR /workspace/PettingLLMs
+
+CMD ["/bin/bash"]

@@ -55,6 +55,9 @@ AGENT_CLASSES = {
     "reasoning_generator": safe_import("pettingllms.multi_agent_env.math.agents.reasoning_agent", "ReasoningAgent"),
     "tool_generator": safe_import("pettingllms.multi_agent_env.math.agents.tool_agent", "ToolAgent"),
     "math_selfverify_single_agent": safe_import("pettingllms.multi_agent_env.math.agents.selfverify_single_agent", "ReasoningAgent"),
+    "decomposer_agent": safe_import("pettingllms.multi_agent_env.math.agents.decomposer_agent", "DecomposerAgent"),
+    "team_designer_agent": safe_import("pettingllms.multi_agent_env.math.agents.team_designer_agent", "TeamDesignerAgent"),
+    "graph_executor_agent": safe_import("pettingllms.multi_agent_env.math.agents.graph_executor_agent", "GraphExecutorAgent"),
 
     # Math aggregation agents
     "aggreted_agent": safe_import("pettingllms.multi_agent_env.math_aggretion.agents.aggreted_agent", "AggregationAgent"),
