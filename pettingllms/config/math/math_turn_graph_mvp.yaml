@@ -87,6 +87,7 @@ multi_agent_interaction:
 training:
   device: cuda
   total_training_steps: 200
+  keep_all_turns_no_tree: true
   entity: pettingllms
   project_name: pettingllms
   experiment_name: math_turn_graph_mvp

@@ -670,12 +670,16 @@ class MultiAgentsPPOTrainer:
                         if model_name in batch_per_trainer and batch_per_trainer[model_name].batch is not None:
                             filter_ratio = getattr(trainer.config, 'filter_ratio', 0.0)
                             filter_method = getattr(trainer.config, 'filter_method', 'uid')
+                            keep_all_turns_no_tree = bool(
+                                getattr(self.config.training, "keep_all_turns_no_tree", False)
+                            )
                             batch_per_trainer[model_name] = self._assign_consistent_uids(
                                 batch_per_trainer[model_name], 
                                 filter_ratio=filter_ratio, 
                                 mode=filter_method, 
                                 sample_num=sample_num,
-                                rollout_mode=self.config.get("rollout_mode","tree")
+                                rollout_mode=self.config.get("rollout_mode","tree"),
+                                keep_all_turns_no_tree=keep_all_turns_no_tree,
                             )
                     
                     all_trainer_metrics = {}
@@ -942,7 +946,15 @@ class MultiAgentsPPOTrainer:
         # for the padded dataproto, make the traj mask to 0. is_last_step also False
         return batch
     
-    def _assign_consistent_uids(self, data_proto, filter_ratio=0.0, mode="mean", sample_num=1, rollout_mode="tree"):
+    def _assign_consistent_uids(
+        self,
+        data_proto,
+        filter_ratio=0.0,
+        mode="mean",
+        sample_num=1,
+        rollout_mode="tree",
+        keep_all_turns_no_tree=False,
+    ):
         """
         Assign consistent UIDs to data and optionally filter based on rewards.
         
@@ -1011,7 +1023,7 @@ class MultiAgentsPPOTrainer:
             return np.var(rewards_in_group, ddof=0) / (rng ** 2)
         
         sample_to_remove = set()
-        if rollout_mode == "no_tree":
+        if rollout_mode == "no_tree" and not keep_all_turns_no_tree:
             # For no_tree mode, keep only samples with maximum turn_indices for each env
             env_max_turn = {}
             for i in range(len(data_proto)):
@@ -1031,6 +1043,11 @@ class MultiAgentsPPOTrainer:
             
             print(f"[DEBUG UID] no_tree mode: removing {len(sample_to_remove)} samples out of {len(data_proto)}")
             colorful_print(f"no_tree mode: keeping only max turn_indices samples, removing {len(sample_to_remove)} samples", "yellow")
+        elif rollout_mode == "no_tree" and keep_all_turns_no_tree:
+            colorful_print(
+                "no_tree mode: keep_all_turns_no_tree=True, keeping all turns (including intermediate rewards)",
+                "yellow",
+            )
         elif mode == "dapo":
             uids_to_remove = []
             for uid, samples in uid_reward_groups.items():
