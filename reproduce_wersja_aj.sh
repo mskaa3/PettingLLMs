@@ -156,7 +156,7 @@ start_ray_on_node() {
     --mount type=bind,src="$RUN_ROOT",dst=/tmp/tmpdir \
     --mount type=bind,src="$HOST_REPO_DIR",dst=/workspace/PettingLLMs \
     "$LOCAL_SIF" \
-    bash -lc "cd /workspace/PettingLLMs && ray start ${ray_args} --num-cpus ${SLURM_CPUS_PER_TASK:-16} --num-gpus ${N_GPUS_PER_NODE} --block" &
+    bash -lc "cd /workspace/PettingLLMs && python3 -m ray.scripts.scripts start ${ray_args} --num-cpus ${SLURM_CPUS_PER_TASK:-16} --num-gpus ${N_GPUS_PER_NODE} --block" &
 }
 
 echo "Starting Ray head on ${head_node} at ${ip_head}"
