@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-gpu=4
 #SBATCH --time=24:00:00
 #SBATCH --mem=0
