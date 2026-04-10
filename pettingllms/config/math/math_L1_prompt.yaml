@@ -90,11 +90,22 @@ models:
       actor_rollout_ref:
         model:
           path: ${base_models.policy_0.path}
+        actor:
+          # Use per-GPU micro batch settings for multi-node FSDP.
+          # The inherited deprecated global micro batch fields are normalized
+          # by world size and can become 0 on 8 GPUs.
+          ppo_micro_batch_size: null
+          ppo_micro_batch_size_per_gpu: 1
+        ref:
+          log_prob_micro_batch_size: null
+          log_prob_micro_batch_size_per_gpu: 4
         rollout:
           temperature: ${training.sample_temperature}
           prompt_length: ${training.max_prompt_length}
           response_length: ${training.max_response_length}
           tensor_model_parallel_size: ${resource.n_gpus_per_node}
+          log_prob_micro_batch_size: null
+          log_prob_micro_batch_size_per_gpu: 4
         trainer:
           n_gpus_per_node: ${resource.n_gpus_per_node}
           n_training_gpus_per_node: ${resource.n_gpus_per_node}
