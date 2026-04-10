@@ -148,6 +148,7 @@ export ip_head="${head_node_ip}:${ray_port}"
 export RAY_ADDRESS="${ip_head}"
 export APPTAINERENV_ip_head="${ip_head}"
 export APPTAINERENV_RAY_ADDRESS="${RAY_ADDRESS}"
+export APPTAINERENV_RAY_TMPDIR="/tmp/ray"
 
 start_ray_on_node() {
   local node_name="$1"
@@ -156,7 +157,7 @@ start_ray_on_node() {
     --mount type=bind,src="$RUN_ROOT",dst=/tmp/tmpdir \
     --mount type=bind,src="$HOST_REPO_DIR",dst=/workspace/PettingLLMs \
     "$LOCAL_SIF" \
-    bash -lc "cd /workspace/PettingLLMs && python3 -m ray.scripts.scripts start ${ray_args} --num-cpus ${SLURM_CPUS_PER_TASK:-16} --num-gpus ${N_GPUS_PER_NODE} --block" &
+    bash -lc "mkdir -p /tmp/ray && cd /workspace/PettingLLMs && TMPDIR=/tmp python3 -m ray.scripts.scripts start ${ray_args} --temp-dir /tmp/ray --num-cpus ${SLURM_CPUS_PER_TASK:-16} --num-gpus ${N_GPUS_PER_NODE} --block" &
 }
 
 echo "Starting Ray head on ${head_node} at ${ip_head}"
@@ -180,6 +181,7 @@ set -euo pipefail
 cd /workspace/PettingLLMs
 
 mkdir -p /tmp/tmpdir/output
+mkdir -p /tmp/ray
 mkdir -p /tmp/tmpdir/huggingface/transformers
 mkdir -p /tmp/tmpdir/huggingface/hub
 mkdir -p /tmp/tmpdir/wandb/.cache
@@ -220,6 +222,8 @@ sed -i 's|base_models.policy_0.path="your base model path"|base_models.policy_0.
 
 echo "=== Training ==="
 echo "Running: bash ${TRAIN_SCRIPT}"
+export TMPDIR=/tmp
+export RAY_TMPDIR=/tmp/ray
 bash "${TRAIN_SCRIPT}"
 BASH_EOF
 )
