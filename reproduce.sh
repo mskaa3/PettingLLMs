@@ -18,7 +18,7 @@ export PREPARE_CODE_DATA="${PREPARE_CODE_DATA:-0}"
 export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
 export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
 
-export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
+export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_turn_graph_mvp.sh}"
 export MODEL_0="${MODEL_0:-Qwen/Qwen3-1.7B}"
 
 export HF_TOKEN="${HF_TOKEN:-}"
