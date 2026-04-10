@@ -19,25 +19,33 @@ export LD_LIBRARY_PATH=$CUDA_HOME/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH}
 
 
-GPU_num="${GPU_num:-1}"
 
+#model_0_config_path="models.model_0.ppo_trainer_config"
+#
+model_0_resource="resource.n_gpus_per_node=$GPU_num  $model_0_config_path.trainer.n_gpus_per_node=$GPU_num $model_0_config_path.trainer.nnodes=$NNODES $model_0_config_path.actor_rollout_ref.rollout.tensor_model_parallel_size=$GPU_num"
+
+GPU_num="${GPU_num:-4}"
+NNODES="${NNODES:-2}"
 
 model_0_config_path="models.model_0.ppo_trainer_config"
-model_0_resource="resource.n_gpus_per_node=$GPU_num  $model_0_config_path.trainer.n_gpus_per_node=$GPU_num $model_0_config_path.trainer.nnodes=1 $model_0_config_path.actor_rollout_ref.rollout.tensor_model_parallel_size=$GPU_num"
+model_0_resource="resource.n_gpus_per_node=$GPU_num resource.nnodes=$NNODES \
+$model_0_config_path.trainer.n_gpus_per_node=$GPU_num \
+$model_0_config_path.trainer.nnodes=$NNODES \
+$model_0_config_path.actor_rollout_ref.rollout.tensor_model_parallel_size=$GPU_num"
 
 
 python3 -m pettingllms.trainer.train --config-path ../config/math --config-name math_L1_prompt \
     $model_0_resource \
-    base_models.policy_0.path="Qwen/Qwen3-1.7B"\
+    base_models.policy_0.path="Qwen/Qwen3-8B"\
     training.project_name=multi-grpo\
     training.entity=julia-moska\
-    training.experiment_name=math_1.7B_prompt\
+    training.experiment_name=qwen8b_prompt\
     training.total_training_steps=200\
     training.train_batch_size=32\
     training.train_sample_num=8\
     training.validate_sample_num=5\
-    training.max_prompt_length=2048\
-    training.max_response_length=4096\
+    training.max_prompt_length=8192\
+    training.max_response_length=8192\
     training.val_freq=10\
     env.dataset=polaris\
     env.benchmark=AIME24\

@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
-#SBATCH --cpus-per-gpu=2
-#SBATCH --time=8:00:00
+#SBATCH --cpus-per-gpu=4
+#SBATCH --time=20:00:00
 #SBATCH --mem=0
 #SBATCH -p lem-gpu-short
 #SBATCH --verbose
-#SBATCH --gres=gpu:hopper:1
+#SBATCH --gres=gpu:hopper:4
 
 set -euo pipefail
 
@@ -21,14 +21,14 @@ export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
 export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
 
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
-export MODEL_0="${MODEL_0:-Qwen/Qwen3-1.7B}"
-export GPU_num="${GPU_num:-1}"
+export MODEL_0="${MODEL_0:-Qwen/Qwen3-8B}"
+export GPU_num="${GPU_num:-4}"
 
 export HF_TOKEN="${HF_TOKEN:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_ENTITY="${WANDB_ENTITY:-moska-phd-research}"
 export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
-export WANDB_NAME="${WANDB_NAME:-first_run}"
+export WANDB_NAME="${WANDB_NAME:-qwen8b-first_run}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 
 # Mode B constants
@@ -297,3 +297,4 @@ fi
 if [[ -n "${RUN_ROOT:-}" && -d "$RUN_ROOT" ]]; then
   rm -rf "$RUN_ROOT"
 fi
+

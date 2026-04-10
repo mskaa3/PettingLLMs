@@ -1,30 +1,30 @@
 #!/bin/bash
 #SBATCH --job-name=multi-grpo
-#SBATCH --nodes=1
-#SBATCH --cpus-per-gpu=2
+#SBATCH --nodes=2
+#SBATCH --cpus-per-gpu=4
 #SBATCH --time=24:00:00
 #SBATCH --mem=0
 #SBATCH -p lem-gpu-short
 #SBATCH --verbose
-#SBATCH --gres=gpu:hopper:2
+#SBATCH --gres=gpu:hopper:4
 
 set -euo pipefail
 
 
 export SIF_S3="${SIF_S3:-s3min-tomasznaskret-1712063354/user/jmoska/stronger_mas_old_v2.sif}"
-export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/ajanz/MultiGRPO/output/}"
+export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiGRPO/output/}"
 
 export PREPARE_CODE_DATA="${PREPARE_CODE_DATA:-0}"
 export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
 export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
 
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
-export MODEL_0="${MODEL_0:-Qwen/Qwen3-1.7B}"
+export MODEL_0="${MODEL_0:-Qwen/Qwen3-8B}"
 
-source ./env.sh
 
-export WANDB_PROJECT="pettingllms-quickstart"
-export WANDB_NAME="first_run"
+export WANDB_ENTITY="moska-phd-research"
+export WANDB_PROJECT="multi-grpo"
+export WANDB_NAME="first_run_qwen8"
 
 ###############################################################################
 # Repo location on host
@@ -135,7 +135,7 @@ mkdir -p /tmp/tmpdir/wandb/.cache
 mkdir -p /tmp/tmpdir/wandb/.config
 mkdir -p /tmp/tmpdir/triton
 mkdir -p /tmp/tmpdir/torch_extensions
-mkdir -p datasets
+mkdir -p data
 
 
 echo "=== Mounted repo ==="
@@ -156,10 +156,10 @@ if [[ "${PREPARE_SOKOBAN_DATA}" == "1" ]]; then
 fi
 
 echo "=== Dataset directories after preparation ==="
-ls -lah datasets || true
-ls -lah datasets/code || true
-ls -lah datasets/math || true
-ls -lah datasets/sudoku_environments || true
+ls -lah data || true
+ls -lah data/code || true
+ls -lah data/math || true
+ls -lah data/sudoku_environments || true
 
 echo "=== Training setup ==="
 

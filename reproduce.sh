@@ -2,7 +2,7 @@
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=1
 #SBATCH --cpus-per-gpu=2
-#SBATCH --time=2:00:00
+#SBATCH --time=20:00:00
 #SBATCH --mem=0
 #SBATCH -p lem-gpu-short
 #SBATCH --verbose
@@ -10,19 +10,6 @@
 
 set -euo pipefail
 
-echo "=== Python diagnostics ==="
-which python || true
-python -V || true
-python - <<'PY'
-import sys
-print("sys.executable:", sys.executable)
-print("sys.path[0:5]:", sys.path[:5])
-try:
-    import datasets
-    print("datasets OK:", datasets.__version__, datasets.__file__)
-except Exception as e:
-    print("datasets import failed:", repr(e))
-PY
 
 export SIF_S3="${SIF_S3:-s3min-tomasznaskret-1712063354/user/jmoska/stronger_mas.sif}"
 export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiGRPO/output/}"
@@ -32,13 +19,13 @@ export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
 export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
 
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
-export MODEL_0="${MODEL_0:-Qwen/Qwen3-1.7B}"
+export MODEL_0="${MODEL_0:-Qwen/Qwen3-8B}"
 
 export HF_TOKEN="${HF_TOKEN:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_ENTITY="${WANDB_ENTITY:-moska-phd-research}"
 export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
-export WANDB_NAME="${WANDB_NAME:-first_run}"
+export WANDB_NAME="${WANDB_NAME:-first_run_qwen8b}"
 
 ###############################################################################
 # Repo location on host
