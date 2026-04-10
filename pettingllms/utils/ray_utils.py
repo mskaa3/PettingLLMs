@@ -45,12 +45,23 @@ def init_ray_with_temp_dirs(config=None, n_gpus_per_node=None):
         available_gpu_count = len(cuda_visible_devices.split(','))
         n_gpus_per_node = min(n_gpus_per_node, available_gpu_count)
     
-    print(f"Initializing Ray with {n_gpus_per_node} GPUs")
-    ray.init(
-        num_gpus=n_gpus_per_node,
-        runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}},
-        _temp_dir=ray_tmp_dir,
-        _system_config=system_config
-    )
+    runtime_env = {"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}}
+    ray_address = os.environ.get("RAY_ADDRESS") or os.environ.get("ip_head")
+
+    if ray_address:
+        print(f"Connecting to existing Ray cluster at {ray_address}")
+        ray.init(
+            address=ray_address,
+            runtime_env=runtime_env,
+            ignore_reinit_error=True,
+        )
+    else:
+        print(f"Initializing local Ray with {n_gpus_per_node} GPUs")
+        ray.init(
+            num_gpus=n_gpus_per_node,
+            runtime_env=runtime_env,
+            _temp_dir=ray_tmp_dir,
+            _system_config=system_config
+        )
     
     return ray_tmp_dir, ray_spill_dir

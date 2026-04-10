@@ -1,6 +1,5 @@
 set -x
 
-export CUDA_VISIBLE_DEVICES=0
 export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VLLM_USE_FLASHINFER_SAMPLER=0
@@ -17,15 +16,8 @@ export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 export LD_LIBRARY_PATH=$CUDA_HOME/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH}
-
-
-
-#model_0_config_path="models.model_0.ppo_trainer_config"
-#
-model_0_resource="resource.n_gpus_per_node=$GPU_num  $model_0_config_path.trainer.n_gpus_per_node=$GPU_num $model_0_config_path.trainer.nnodes=$NNODES $model_0_config_path.actor_rollout_ref.rollout.tensor_model_parallel_size=$GPU_num"
-
-GPU_num="${GPU_num:-4}"
-NNODES="${NNODES:-2}"
+GPU_num="${GPU_num:-${N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}}"
+NNODES="${NNODES:-${SLURM_NNODES:-2}}"
 
 model_0_config_path="models.model_0.ppo_trainer_config"
 model_0_resource="resource.n_gpus_per_node=$GPU_num resource.nnodes=$NNODES \

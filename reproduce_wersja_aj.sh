@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=multi-grpo
 #SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-gpu=4
 #SBATCH --time=24:00:00
 #SBATCH --mem=0
@@ -20,6 +21,8 @@ export PREPARE_SOKOBAN_DATA="${PREPARE_SOKOBAN_DATA:-0}"
 
 export TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train/math/math_L1_prompt.sh}"
 export MODEL_0="${MODEL_0:-Qwen/Qwen3-8B}"
+export NNODES="${NNODES:-${SLURM_NNODES:-2}}"
+export N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
 
 
 export WANDB_ENTITY="moska-phd-research"
@@ -115,10 +118,59 @@ export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
 
 export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
 export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
+export APPTAINERENV_NNODES="${NNODES}"
+export APPTAINERENV_N_GPUS_PER_NODE="${N_GPUS_PER_NODE}"
+export APPTAINERENV_GPU_num="${N_GPUS_PER_NODE}"
 
 # Point Python at mounted repo + vendored verl
 export APPTAINERENV_PYTHONPATH="/workspace/PettingLLMs:/workspace/PettingLLMs/verl:${PYTHONPATH:-}"
 
+
+###############################################################################
+# Ray bootstrap
+###############################################################################
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=($nodes)
+
+head_node=${nodes_array[0]}
+head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+
+if [[ "$head_node_ip" == *" "* ]]; then
+  IFS=' ' read -ra ADDR <<<"$head_node_ip"
+  if [[ ${#ADDR[0]} -gt 16 ]]; then
+    head_node_ip=${ADDR[1]}
+  else
+    head_node_ip=${ADDR[0]}
+  fi
+fi
+
+ray_port="${RAY_PORT:-6379}"
+export ip_head="${head_node_ip}:${ray_port}"
+export RAY_ADDRESS="${ip_head}"
+export APPTAINERENV_ip_head="${ip_head}"
+export APPTAINERENV_RAY_ADDRESS="${RAY_ADDRESS}"
+
+start_ray_on_node() {
+  local node_name="$1"
+  local ray_args="$2"
+  srun --overlap --nodes=1 --ntasks=1 -w "$node_name" apptainer exec --nv \
+    --mount type=bind,src="$RUN_ROOT",dst=/tmp/tmpdir \
+    --mount type=bind,src="$HOST_REPO_DIR",dst=/workspace/PettingLLMs \
+    "$LOCAL_SIF" \
+    bash -lc "cd /workspace/PettingLLMs && ray start ${ray_args} --num-cpus ${SLURM_CPUS_PER_TASK:-16} --num-gpus ${N_GPUS_PER_NODE} --block" &
+}
+
+echo "Starting Ray head on ${head_node} at ${ip_head}"
+start_ray_on_node "$head_node" "--head --node-ip-address=${head_node_ip} --port=${ray_port}"
+sleep 10
+
+worker_num=$((NNODES - 1))
+for ((i = 1; i <= worker_num; i++)); do
+  node_i=${nodes_array[$i]}
+  echo "Starting Ray worker ${i} on ${node_i}"
+  start_ray_on_node "$node_i" "--address ${ip_head}"
+  sleep 5
+done
 
 ###############################################################################
 # Command run inside container
@@ -176,7 +228,7 @@ BASH_EOF
 ###############################################################################
 # Run inside Apptainer
 ###############################################################################
-srun apptainer exec --nv \
+srun --overlap --nodes=1 --ntasks=1 -w "$head_node" apptainer exec --nv \
   --mount type=bind,src="$RUN_ROOT",dst=/tmp/tmpdir \
   --mount type=bind,src="$HOST_REPO_DIR",dst=/workspace/PettingLLMs \
   "$LOCAL_SIF" \
