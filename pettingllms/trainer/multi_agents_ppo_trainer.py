@@ -628,6 +628,9 @@ class MultiAgentsPPOTrainer:
         time_str = current_time.strftime("%H-%M-%S")
         
         experiment_name = self.config.training.experiment_name
+        training_entity = OmegaConf.select(self.config, "training.entity", default=None)
+        if training_entity in (None, ""):
+            training_entity = os.environ.get("WANDB_ENTITY")
         log_dir = os.path.join("logs", experiment_name, date_str, time_str)
         os.makedirs(log_dir, exist_ok=True)
         
@@ -635,7 +638,7 @@ class MultiAgentsPPOTrainer:
             project_name=self.config.training.project_name,
             experiment_name=experiment_name,
             default_backend=self.config.training.logger,
-            entity=self.config.training.entity,
+            entity=training_entity,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
         
