@@ -32,7 +32,7 @@ WORKER_TRAINABLE="${WORKER_TRAINABLE:-false}"
 WORKER_OPTIMIZATION_MODE="${WORKER_OPTIMIZATION_MODE:-prompt}"
 ORCHESTRATOR_TRAINABLE="${ORCHESTRATOR_TRAINABLE:-true}"
 ORCHESTRATOR_OPTIMIZATION_MODE="${ORCHESTRATOR_OPTIMIZATION_MODE:-prompt}"
-WANDB_ENTITY_VALUE="${WANDB_ENTITY:-moska-phd-research}"
+
 
 echo "Hybrid shared orchestrator split: TOTAL_GPUS=$TOTAL_GPUS PER_MODEL=$EQUAL_GPUS_PER_MODEL UNUSED_GPUS=$UNUSED_GPUS"
 
@@ -61,7 +61,6 @@ python3 -m pettingllms.trainer.train --config-path ../config/mas_graph --config-
     worker_defaults.trainable=$WORKER_TRAINABLE \
     worker_defaults.optimization_mode=$WORKER_OPTIMIZATION_MODE \
     training.project_name=multi-grpo \
-    training.entity="$WANDB_ENTITY_VALUE" \
     training.experiment_name=math_decomposer_selector_hybrid_shared \
     training.total_training_steps=200 \
     training.train_batch_size=16 \
