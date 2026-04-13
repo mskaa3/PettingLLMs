@@ -26,7 +26,7 @@ export N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
 
 export WANDB_ENTITY="moska-phd-research"
 export WANDB_PROJECT="multi-grpo"
-export WANDB_NAME="first_run_qwen8"
+export WANDB_NAME="first_run_qwen8_multinode"
 
 ###############################################################################
 # Repo location on host
