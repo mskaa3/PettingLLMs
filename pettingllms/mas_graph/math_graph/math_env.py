@@ -25,8 +25,22 @@ class MathEnvState:
     code_generated_solution_history: List = field(default_factory=list)
     reasoning_extracted_answer_history: List = field(default_factory=list)
     code_extracted_answer_history: List = field(default_factory=list)
+    available_agents: List[Dict[str, Any]] = field(default_factory=list)
+    decomposition_graph: Dict[str, Any] = field(default_factory=dict)
+    assignment_plan: Dict[str, Any] = field(default_factory=dict)
+    subtask_results: Dict[str, Any] = field(default_factory=dict)
+    subtask_execution_trace: List[Dict[str, Any]] = field(default_factory=list)
+    partial_rewards: Dict[str, float] = field(default_factory=dict)
+    hop_reward_overrides: Dict[int, float] = field(default_factory=dict)
+    hop_metadata: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    performance_memory_snapshot: Dict[str, Any] = field(default_factory=dict)
+    performance_memory_update: Dict[str, Any] = field(default_factory=dict)
+    decomposition_reward: float = 0.0
+    selector_reward: float = 0.0
+    final_answer_candidate: str = None
     # Final reward assigned at end of workflow (1.0 if correct answer, else 0.0)
     final_reward: float = 0.0
+
 class MathEnv(Env):
     """
     Environment for mathematical problem solving tasks with single-agent interaction.
@@ -62,6 +76,19 @@ class MathEnv(Env):
         self.state.code_generated_solution_history = []
         self.state.reasoning_extracted_answer_history = []
         self.state.code_extracted_answer_history = []
+        self.state.available_agents = []
+        self.state.decomposition_graph = {}
+        self.state.assignment_plan = {}
+        self.state.subtask_results = {}
+        self.state.subtask_execution_trace = []
+        self.state.partial_rewards = {}
+        self.state.hop_reward_overrides = {}
+        self.state.hop_metadata = {}
+        self.state.performance_memory_snapshot = {}
+        self.state.performance_memory_update = {}
+        self.state.decomposition_reward = 0.0
+        self.state.selector_reward = 0.0
+        self.state.final_answer_candidate = None
         self.state.final_reward = 0.0
         self.final_reward = 0.0
 

@@ -121,7 +121,18 @@ def init_agent_execution_engine(config: DictConfig, address: str):
     lora_differ_mode = False
     agent_lora_mapping = {}
 
-    if hasattr(config, 'specialization') and config.specialization == "lora":
+    lora_eval_agents = []
+    if hasattr(config, 'specialization'):
+        if config.specialization == "lora":
+            lora_eval_agents = [agent_config.name for _, agent_config in config.agent_policy_configs.agent_configs.items()]
+        elif config.specialization == "hybrid":
+            for _, agent_config in config.agent_policy_configs.agent_configs.items():
+                optimization_mode = getattr(agent_config, "optimization_mode", "prompt")
+                trainable = getattr(agent_config, "trainable", True)
+                if str(optimization_mode).lower() == "lora" and bool(trainable):
+                    lora_eval_agents.append(agent_config.name)
+
+    if lora_eval_agents:
         print("=" * 60)
         print("LoRA Specialization Detected")
         print("=" * 60)
@@ -130,7 +141,7 @@ def init_agent_execution_engine(config: DictConfig, address: str):
         if hasattr(config, 'lora_paths') and config.lora_paths:
             # Parse lora_paths (comma-separated string)
             lora_paths_list = config.lora_paths.split(',')
-            num_agents = len(agent_policy_mapping)
+            num_agents = len(lora_eval_agents)
 
             # Validate that number of LoRA paths matches number of agents
             if len(lora_paths_list) != num_agents:
@@ -138,7 +149,7 @@ def init_agent_execution_engine(config: DictConfig, address: str):
                     f"Number of LoRA paths ({len(lora_paths_list)}) does not match "
                     f"number of agents ({num_agents}). "
                     f"LoRA paths: {lora_paths_list}, "
-                    f"Agents: {list(agent_policy_mapping.keys())}"
+                    f"Agents: {lora_eval_agents}"
                 )
 
             lora_differ_mode = True
@@ -150,7 +161,11 @@ def init_agent_execution_engine(config: DictConfig, address: str):
             # Map agents to LoRA adapters based on agent_configs order (agent_0, agent_1, ...)
             # This ensures consistent mapping regardless of dictionary iteration order
             agent_config_items = sorted(
-                config.agent_policy_configs.agent_configs.items(),
+                [
+                    (agent_key, agent_config)
+                    for agent_key, agent_config in config.agent_policy_configs.agent_configs.items()
+                    if agent_config.name in lora_eval_agents
+                ],
                 key=lambda x: int(x[0].split('_')[1])  # Sort by agent number: agent_0, agent_1, ...
             )
             print(f"Agent config order: {[item[0] for item in agent_config_items]}")

@@ -3,6 +3,7 @@ import json
 import math
 import os
 import uuid
+from collections import defaultdict
 from functools import reduce
 from pprint import pprint
 from queue import Queue
@@ -66,28 +67,129 @@ class MultiAgentsPPOTrainer:
         self.rollout_sample_dict = {}
         self.ppo_trainer_dict = {}
         self.agent_policy_mapping = agent_policy_mapping
+        self.agent_policy_modes = {}
+        self.agent_trainable = {}
+        self.policy_to_agents = defaultdict(list)
         self.agent_lora_mapping = {}
         self.lora_differ_mode = False
         self.lora_num = 1
+        self.inferred_agent_untrained = []
         # Control variable: whether to use LoRA for generation (False initially for base model)
         self.use_lora_for_generation = False
 
+        self._initialize_agent_training_configuration()
+
         # Read agent_untrained configuration
-        self.agent_untrained = []
+        self.agent_untrained = list(self.inferred_agent_untrained)
         if hasattr(config, 'multi_agent_interaction') and hasattr(config.multi_agent_interaction, 'agent_untrained'):
-            self.agent_untrained = config.multi_agent_interaction.agent_untrained
+            self.agent_untrained = list(config.multi_agent_interaction.agent_untrained)
+        self.agent_untrained = list(dict.fromkeys(self.agent_untrained))
+        if self.agent_untrained:
             colorful_print(f"Agents excluded from training: {self.agent_untrained}", "yellow")
 
-        if config.specialization =="lora":
-            self.lora_num = len(self.agent_policy_mapping)
+        lora_agents = [
+            agent_name
+            for agent_name, optimization_mode in self.agent_policy_modes.items()
+            if optimization_mode == "lora" and self.agent_trainable.get(agent_name, True)
+        ]
+        if lora_agents:
+            self.lora_num = len(lora_agents)
             self.lora_differ_mode = True
-            for agent_idx, agent_name in enumerate(self.agent_policy_mapping.keys()):
-                    lora_id = agent_idx+1  # Use integer ID directly ( 1, 2, ...)
-                    self.agent_lora_mapping[agent_name] = lora_id
+            for agent_idx, agent_name in enumerate(lora_agents):
+                lora_id = agent_idx + 1
+                self.agent_lora_mapping[agent_name] = lora_id
+            colorful_print(f"LoRA-enabled agents: {lora_agents}", "cyan")
                   
         
         # Step 2: Initialize PPO trainers based on specialization
         self._initialize_ppo_trainers()
+
+    def _initialize_agent_training_configuration(self):
+        configured_untrained = []
+        if hasattr(self.config, 'multi_agent_interaction') and hasattr(self.config.multi_agent_interaction, 'agent_untrained'):
+            configured_untrained = list(self.config.multi_agent_interaction.agent_untrained)
+
+        inferred_untrained = []
+        for agent_key, agent_config in self.config.agent_policy_configs.agent_configs.items():
+            agent_name = agent_config.name
+            policy_name = agent_config.policy_name
+            self.policy_to_agents[policy_name].append(agent_name)
+
+            optimization_mode = getattr(agent_config, "optimization_mode", None)
+            if optimization_mode is None:
+                if self.config.specialization == "lora":
+                    optimization_mode = "lora"
+                else:
+                    optimization_mode = "prompt"
+            optimization_mode = str(optimization_mode).lower()
+            if optimization_mode in {"shared", "base"}:
+                optimization_mode = "prompt"
+            if optimization_mode in {"inference", "frozen"}:
+                optimization_mode = "prompt"
+                inferred_trainable = False
+            else:
+                inferred_trainable = True
+
+            explicit_trainable = getattr(agent_config, "trainable", None)
+            trainable = inferred_trainable if explicit_trainable is None else bool(explicit_trainable)
+
+            if not trainable and optimization_mode == "lora":
+                colorful_print(
+                    f"Agent {agent_name} requested LoRA while trainable=False; falling back to prompt inference mode.",
+                    "yellow",
+                )
+                optimization_mode = "prompt"
+
+            if agent_name in configured_untrained:
+                trainable = False
+
+            if optimization_mode not in {"prompt", "lora"}:
+                raise ValueError(
+                    f"Unsupported optimization_mode '{optimization_mode}' for agent '{agent_name}'. "
+                    "Supported values: prompt, lora, frozen/inference."
+                )
+
+            self.agent_policy_modes[agent_name] = optimization_mode
+            self.agent_trainable[agent_name] = trainable
+
+            if not trainable:
+                inferred_untrained.append(agent_name)
+
+        if hasattr(self.config, 'multi_agent_interaction'):
+            current_untrained = list(getattr(self.config.multi_agent_interaction, 'agent_untrained', []))
+            merged_untrained = list(dict.fromkeys(current_untrained + inferred_untrained))
+            OmegaConf.set_struct(self.config, False)
+            self.config.multi_agent_interaction.agent_untrained = merged_untrained
+            OmegaConf.set_struct(self.config, True)
+            self.inferred_agent_untrained = merged_untrained
+        else:
+            self.inferred_agent_untrained = list(dict.fromkeys(configured_untrained + inferred_untrained))
+
+    def _get_policy_agents(self, policy_name):
+        return list(self.policy_to_agents.get(policy_name, []))
+
+    def _configure_model_adaptation(self, ppo_config, policy_name):
+        ppo_config.trainer.experiment_name = self.config.training.experiment_name
+        ppo_config.actor_rollout_ref.model.lora_alpha = self.config.get("lora_alpha", 16)
+
+        lora_agents_for_policy = [
+            agent_name
+            for agent_name in self._get_policy_agents(policy_name)
+            if agent_name in self.agent_lora_mapping
+        ]
+
+        if lora_agents_for_policy:
+            ppo_config.actor_rollout_ref.model.lora_rank = self.config.get("lora_rank", 0)
+            ppo_config.actor_rollout_ref.rollout.enable_lora = True
+            ppo_config.actor_rollout_ref.rollout.max_loras = max(
+                self.agent_lora_mapping[agent_name] for agent_name in lora_agents_for_policy
+            )
+            ppo_config.actor_rollout_ref.rollout.max_lora_rank = self.config.get("lora_rank", 0)
+        else:
+            ppo_config.actor_rollout_ref.model.lora_rank = 0
+            ppo_config.actor_rollout_ref.rollout.enable_lora = False
+            ppo_config.actor_rollout_ref.rollout.max_loras = 0
+            ppo_config.actor_rollout_ref.rollout.max_lora_rank = 0
 
    
 
@@ -97,7 +199,7 @@ class MultiAgentsPPOTrainer:
         specialization = config.specialization
         
         
-        if specialization in ["prompt", "lora"]:
+        if specialization in ["prompt", "lora"] or (specialization == "hybrid" and len(config.models) == 1):
             # Single PPO trainer for prompt/lora specialization
             self._create_single_ppo_trainer()
         else:
@@ -117,18 +219,7 @@ class MultiAgentsPPOTrainer:
             raise ValueError(f"Model '{model_name}' missing ppo_trainer_config")
         
         ppo_config = model_config.ppo_trainer_config
-        ppo_config.actor_rollout_ref.model.lora_rank = config.get("lora_rank", 0)
-        ppo_config.actor_rollout_ref.model.lora_alpha = config.get("lora_alpha", 16)
-        if ppo_config.actor_rollout_ref.model.lora_rank > 0:
-            print("Enabling LoRA in single PPO trainer")
-            ppo_config.actor_rollout_ref.rollout.enable_lora = True
-            ppo_config.actor_rollout_ref.rollout.max_loras = self.lora_num
-            ppo_config.trainer.experiment_name = config.training.experiment_name
-            ppo_config.actor_rollout_ref.rollout.max_lora_rank = config.get("lora_rank", 0)
-        else:
-            ppo_config.actor_rollout_ref.rollout.enable_lora = False
-            ppo_config.actor_rollout_ref.rollout.max_loras = 0
-            ppo_config.actor_rollout_ref.rollout.max_lora_rank = 0
+        self._configure_model_adaptation(ppo_config, model_name)
         self.ppo_trainer_config_dict[model_name] = ppo_config
         ppo_config.data["train_batch_size"] = config.training.train_batch_size
         
@@ -158,18 +249,7 @@ class MultiAgentsPPOTrainer:
             ppo_config = model_config.ppo_trainer_config
             self.ppo_trainer_config_dict[model_name] = ppo_config
             ppo_config.data["train_batch_size"] = config.training.train_batch_size
-            ppo_config.actor_rollout_ref.model.lora_rank = config.get("lora_rank", 0)
-            ppo_config.actor_rollout_ref.model.lora_alpha = config.get("lora_alpha", 16)
-            ppo_config.trainer.experiment_name = config.training.experiment_name
-            
-            if ppo_config.actor_rollout_ref.model.lora_rank > 0:
-                ppo_config.actor_rollout_ref.rollout.enable_lora = True
-                ppo_config.actor_rollout_ref.rollout.max_loras = self.lora_num if hasattr(self, 'lora_num') else 1
-                ppo_config.actor_rollout_ref.rollout.max_lora_rank = config.get("lora_rank", 0)
-            else:
-                ppo_config.actor_rollout_ref.rollout.enable_lora = False
-                ppo_config.actor_rollout_ref.rollout.max_loras = 0
-                ppo_config.actor_rollout_ref.rollout.max_lora_rank = 0
+            self._configure_model_adaptation(ppo_config, model_name)
             
             ppo_trainer = RayPPOTrainer(
                 config=ppo_config,
@@ -263,6 +343,14 @@ class MultiAgentsPPOTrainer:
             colorful_print(f"✓ [{idx}/{len(self.ppo_trainer_dict)}] Successfully initialized: {model_name}", "green")
         
         colorful_print(f"All {len(self.ppo_trainer_dict)} trainers initialized successfully!", "green")
+        
+    def _batch_has_samples(self, batch):
+        if batch is None or getattr(batch, "batch", None) is None:
+            return False
+        try:
+            return len(batch) > 0
+        except Exception:
+            return True
         
 
 
@@ -723,6 +811,9 @@ class MultiAgentsPPOTrainer:
             # Use the first trainer's batch for metrics calculation
     
             for model_name, batch in batch_per_trainer.items():
+                if not self._batch_has_samples(batch):
+                    colorful_print(f"Skipping metrics for {model_name}: no trainable samples in batch", "yellow")
+                    continue
                 for metric_name, metric_value in compute_data_metrics(batch=batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())).items():
                     metric_name_policy= model_name + "_" + metric_name
                     metrics[metric_name_policy] = metric_value

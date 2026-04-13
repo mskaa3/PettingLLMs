@@ -1,0 +1,242 @@
+defaults:
+- ../ppo_trainer@models.model_0.ppo_trainer_config: eval
+- ../ppo_trainer@models.model_1.ppo_trainer_config: eval
+- ../ppo_trainer@models.model_2.ppo_trainer_config: eval
+- _self_
+
+workflow_type: graph
+workflow_function: math_decomposer_selector_graph
+specialization: hybrid
+lora_rank: 16
+lora_alpha: 32
+
+resource:
+  nnodes: 1
+  n_gpus_per_node: 6
+  trust_remote_code: true
+
+env:
+  name: math_env
+  dataset: polaris
+  benchmark: AIME24
+  multi_modal: false
+  batched_init: true
+
+orchestration:
+  max_subtasks: 4
+  require_final_synthesis_subtask: true
+  selector_final_reward_weight: 0.40
+  selector_partial_reward_weight: 0.35
+  selector_compatibility_weight: 0.25
+  worker_partial_reward_weight: 0.65
+  worker_final_reward_weight: 0.35
+  partial_reward_success_threshold: 0.55
+
+decomposer_defaults:
+  optimization_mode: prompt
+  trainable: true
+
+selector_defaults:
+  optimization_mode: prompt
+  trainable: true
+
+worker_defaults:
+  optimization_mode: prompt
+  trainable: false
+
+base_models:
+  policy_0:
+    path: your base model path
+    name: decomposer_model
+  policy_1:
+    path: your base model path
+    name: selector_model
+  policy_2:
+    path: your base model path
+    name: worker_model
+
+agent_policy_configs:
+  agent_configs:
+    agent_0:
+      name: decomposer
+      role: decomposer
+      policy_name: decomposer_model
+      optimization_mode: ${decomposer_defaults.optimization_mode}
+      trainable: ${decomposer_defaults.trainable}
+      profile:
+        description: Decomposes the task into a dependency-aware graph of subtasks.
+        capabilities:
+        - planning
+        - task_decomposition
+        - dependency_modeling
+      train_llm_config:
+        enable_thinking: false
+        temperature: 1.0
+        top_p: 0.9
+        top_k: 20
+        min_p: 0.0
+      val_llm_config:
+        enable_thinking: false
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+    agent_1:
+      name: selector
+      role: selector
+      policy_name: selector_model
+      optimization_mode: ${selector_defaults.optimization_mode}
+      trainable: ${selector_defaults.trainable}
+      profile:
+        description: Assigns worker agents to subtasks using fit and reward history.
+        capabilities:
+        - agent_selection
+        - scheduling
+        - capability_matching
+      train_llm_config:
+        enable_thinking: false
+        temperature: 1.0
+        top_p: 0.9
+        top_k: 20
+        min_p: 0.0
+      val_llm_config:
+        enable_thinking: false
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+    agent_2:
+      name: reasoning_worker
+      role: worker
+      policy_name: worker_model
+      optimization_mode: ${worker_defaults.optimization_mode}
+      trainable: ${worker_defaults.trainable}
+      profile:
+        description: Strong at symbolic reasoning, proofs, and synthesis.
+        capabilities:
+        - general_reasoning
+        - proof
+        - symbolic_reasoning
+        - final_synthesis
+      train_llm_config:
+        enable_thinking: false
+        temperature: 1.0
+        top_p: 0.9
+        top_k: 20
+        min_p: 0.0
+      val_llm_config:
+        enable_thinking: false
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+    agent_3:
+      name: computation_worker
+      role: worker
+      policy_name: worker_model
+      optimization_mode: ${worker_defaults.optimization_mode}
+      trainable: ${worker_defaults.trainable}
+      profile:
+        description: Strong at arithmetic, algebraic manipulation, and checking calculations.
+        capabilities:
+        - calculation
+        - arithmetic
+        - algebra
+        - verification
+      train_llm_config:
+        enable_thinking: false
+        temperature: 1.0
+        top_p: 0.9
+        top_k: 20
+        min_p: 0.0
+      val_llm_config:
+        enable_thinking: false
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+
+training:
+  device: cuda
+  total_training_steps: 200
+  project_name: pettingllms
+  experiment_name: math_decomposer_selector_hybrid_separate
+  logger:
+  - console
+  - wandb
+  model_checkpoints_dir: checkpoints
+  ray_wait_register_center_timeout: 300
+  train_batch_size: 16
+  train_sample_num: 4
+  validate_sample_num: 1
+  sample_temperature: 1
+  val_freq: 10
+  max_prompt_length: 4096
+  max_response_length: 2048
+  lora_rank: ${lora_rank}
+  lora_alpha: ${lora_alpha}
+  num_workers: 180
+  reward_algorithm: default
+  performance_memory_recent_limit: 50
+
+models:
+  model_0:
+    path: ${base_models.policy_0.path}
+    name: ${base_models.policy_0.name}
+    ppo_trainer_config:
+      filter_method: mean
+      filter_ratio: 0.5
+      data:
+        max_prompt_length: ${training.max_prompt_length}
+        max_response_length: ${training.max_response_length}
+      actor_rollout_ref:
+        model:
+          path: ${base_models.policy_0.path}
+        rollout:
+          temperature: ${training.sample_temperature}
+          prompt_length: ${training.max_prompt_length}
+          response_length: ${training.max_response_length}
+          tensor_model_parallel_size: 1
+        trainer:
+          n_gpus_per_node: 1
+          n_training_gpus_per_node: 1
+  model_1:
+    path: ${base_models.policy_1.path}
+    name: ${base_models.policy_1.name}
+    ppo_trainer_config:
+      filter_method: mean
+      filter_ratio: 0.5
+      data:
+        max_prompt_length: ${training.max_prompt_length}
+        max_response_length: ${training.max_response_length}
+      actor_rollout_ref:
+        model:
+          path: ${base_models.policy_1.path}
+        rollout:
+          temperature: ${training.sample_temperature}
+          prompt_length: ${training.max_prompt_length}
+          response_length: ${training.max_response_length}
+          tensor_model_parallel_size: 1
+        trainer:
+          n_gpus_per_node: 1
+          n_training_gpus_per_node: 1
+  model_2:
+    path: ${base_models.policy_2.path}
+    name: ${base_models.policy_2.name}
+    ppo_trainer_config:
+      filter_method: mean
+      filter_ratio: 0.5
+      data:
+        max_prompt_length: ${training.max_prompt_length}
+        max_response_length: ${training.max_response_length}
+      actor_rollout_ref:
+        model:
+          path: ${base_models.policy_2.path}
+        rollout:
+          temperature: ${training.sample_temperature}
+          prompt_length: ${training.max_prompt_length}
+          response_length: ${training.max_response_length}
+          tensor_model_parallel_size: 1
+        trainer:
+          n_gpus_per_node: 1
+          n_training_gpus_per_node: 1

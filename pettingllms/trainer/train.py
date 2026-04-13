@@ -83,6 +83,18 @@ def train_multi_agents(config):
             raise ValueError(
                 f"For specialization='lora', lora_rank must be > 0, but got {config.lora_rank}"
             )
+    if specialization == "hybrid":
+        hybrid_lora_agents = []
+        for agent_key, agent_config in config.agent_policy_configs.agent_configs.items():
+            optimization_mode = getattr(agent_config, "optimization_mode", "prompt")
+            trainable = getattr(agent_config, "trainable", True)
+            if str(optimization_mode).lower() == "lora" and bool(trainable):
+                hybrid_lora_agents.append(agent_config.name)
+        if hybrid_lora_agents and config.lora_rank <= 0:
+            raise ValueError(
+                f"For specialization='hybrid' with LoRA agents {hybrid_lora_agents}, "
+                f"lora_rank must be > 0, but got {config.lora_rank}"
+            )
     
     # Handle 'full' specialization with single base_model - replicate configs
     if specialization == "full" and num_base_models == 1:

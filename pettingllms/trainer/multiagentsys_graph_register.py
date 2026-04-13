@@ -35,6 +35,10 @@ AGENT_WORKER_FLOW_FUNCTIONS = {
     # Import from the multi_agent_env.autogen_graph for backward compatibility
     "code_graph": safe_import("pettingllms.mas_graph.code_graph.code_graph", "code_graph"),
     "math_graph": safe_import("pettingllms.mas_graph.math_graph.math_graph", "math_graph"),
+    "math_decomposer_selector_graph": safe_import(
+        "pettingllms.mas_graph.math_graph.decomposer_selector_graph",
+        "math_decomposer_selector_graph",
+    ),
     # Also support old import paths if needed
     "code_graph_legacy": safe_import("pettingllms.multi_agent_env.autogen_graph.code_graph.code_graph", "code_graph"),
     "math_graph_legacy": safe_import("pettingllms.multi_agent_env.autogen_graph.math_graph.math_graph", "math_graph"),

@@ -99,7 +99,9 @@ class MultiAgentsExecutionEngineGraph:
             self.agent_config_dict[agent_name] = agent_config
             self.agent_names.append(agent_name)
         # Calculate num_interacting_agents from agent_configs length
+        self.turn_order = list(self.agent_names)
         self.num_interacting_agents = len(self.agent_names)
+        self.max_turns = getattr(self.config.env, "max_turns", getattr(self.config.training, "max_hops", 0))
         self.step_timeout = getattr(self.config.training, 'step_timeout', 150.0)
         print(f"agent_config_dict keys: {list(self.agent_config_dict.keys())}")
         print(f"agent_names: {self.agent_names}")
@@ -107,9 +109,151 @@ class MultiAgentsExecutionEngineGraph:
         self.server_address_dict = server_address_dict 
         self.chat_parser_dict={}
         self.rollout_latency_dict = {}
+        self.performance_memory = self._initialize_performance_memory()
+        self._performance_memory_lock = asyncio.Lock()
         self.timer.checkpoint("MultiAgentsExecutionEngine initialization completed")
 
-        
+    def _initialize_performance_memory(self):
+        return {
+            "agent_stats": {},
+            "selector_stats": {},
+            "decomposer_stats": {
+                "attempts": 0,
+                "valid_plans": 0,
+                "total_reward": 0.0,
+                "total_subtasks": 0.0,
+            },
+            "recent_events": [],
+        }
+
+    def _default_agent_role(self, agent_name: str) -> str:
+        lowered = str(agent_name).lower()
+        if "decomposer" in lowered:
+            return "decomposer"
+        if "selector" in lowered:
+            return "selector"
+        return "worker"
+
+    def _build_agent_profile(self, agent_name: str, agent_config):
+        profile_cfg = getattr(agent_config, "profile", None)
+        capabilities = list(getattr(profile_cfg, "capabilities", [])) if profile_cfg else []
+        description = getattr(profile_cfg, "description", "") if profile_cfg else ""
+        return {
+            "name": agent_name,
+            "role": getattr(agent_config, "role", self._default_agent_role(agent_name)),
+            "policy_name": getattr(agent_config, "policy_name", None),
+            "capabilities": capabilities,
+            "description": description,
+        }
+
+    def _collect_available_agents(self):
+        return [
+            self._build_agent_profile(agent_name, self.agent_config_dict.get(agent_name))
+            for agent_name in self.agent_names
+        ]
+
+    def _snapshot_performance_memory(self):
+        return copy.deepcopy(self.performance_memory)
+
+    def _to_numpy_value(self, value):
+        if isinstance(value, bool):
+            return np.array([value], dtype=np.bool_)
+        if isinstance(value, int):
+            return np.array([value], dtype=np.int32)
+        if isinstance(value, float):
+            return np.array([value], dtype=np.float32)
+        return np.array([value], dtype=object)
+
+    def _append_recent_event(self, event):
+        recent_events = self.performance_memory.setdefault("recent_events", [])
+        recent_events.append(event)
+        max_recent_events = getattr(self.config.training, "performance_memory_recent_limit", 50)
+        if len(recent_events) > max_recent_events:
+            del recent_events[:-max_recent_events]
+
+    def _merge_agent_event(self, event):
+        agent_name = event.get("agent_name")
+        if not agent_name:
+            return
+
+        agent_stats = self.performance_memory.setdefault("agent_stats", {})
+        bucket = agent_stats.setdefault(
+            agent_name,
+            {
+                "attempts": 0,
+                "successes": 0,
+                "total_partial_reward": 0.0,
+                "total_final_reward": 0.0,
+                "capability_stats": {},
+            },
+        )
+        bucket["attempts"] += 1
+        bucket["successes"] += int(bool(event.get("success", False)))
+        bucket["total_partial_reward"] += float(event.get("partial_reward", 0.0))
+        bucket["total_final_reward"] += float(event.get("final_reward", 0.0))
+
+        for capability in event.get("required_capabilities", []) or []:
+            cap_bucket = bucket["capability_stats"].setdefault(
+                capability,
+                {
+                    "attempts": 0,
+                    "successes": 0,
+                    "total_partial_reward": 0.0,
+                },
+            )
+            cap_bucket["attempts"] += 1
+            cap_bucket["successes"] += int(bool(event.get("success", False)))
+            cap_bucket["total_partial_reward"] += float(event.get("partial_reward", 0.0))
+
+    def _merge_selector_event(self, event):
+        agent_name = event.get("agent_name")
+        subtask_type = event.get("subtask_type", "generic")
+        if not agent_name:
+            return
+
+        selector_key = f"{subtask_type}::{agent_name}"
+        selector_stats = self.performance_memory.setdefault("selector_stats", {})
+        bucket = selector_stats.setdefault(
+            selector_key,
+            {
+                "agent_name": agent_name,
+                "subtask_type": subtask_type,
+                "attempts": 0,
+                "successes": 0,
+                "total_partial_reward": 0.0,
+                "total_final_reward": 0.0,
+                "total_compatibility": 0.0,
+            },
+        )
+        bucket["attempts"] += 1
+        bucket["successes"] += int(bool(event.get("success", False)))
+        bucket["total_partial_reward"] += float(event.get("partial_reward", 0.0))
+        bucket["total_final_reward"] += float(event.get("final_reward", 0.0))
+        bucket["total_compatibility"] += float(event.get("compatibility", 0.0))
+
+    def _merge_decomposer_event(self, event):
+        decomposer_stats = self.performance_memory.setdefault("decomposer_stats", {})
+        decomposer_stats["attempts"] = decomposer_stats.get("attempts", 0) + 1
+        decomposer_stats["valid_plans"] = decomposer_stats.get("valid_plans", 0) + int(bool(event.get("valid", False)))
+        decomposer_stats["total_reward"] = decomposer_stats.get("total_reward", 0.0) + float(event.get("reward", 0.0))
+        decomposer_stats["total_subtasks"] = decomposer_stats.get("total_subtasks", 0.0) + float(event.get("num_subtasks", 0))
+
+    async def _merge_performance_memory_updates(self, result_env):
+        state = getattr(result_env, "state", None)
+        updates = getattr(state, "performance_memory_update", {}) if state is not None else {}
+        if not updates:
+            return
+
+        async with self._performance_memory_lock:
+            for event in updates.get("agent_events", []):
+                self._merge_agent_event(event)
+                self._append_recent_event({"type": "agent", **event})
+            for event in updates.get("selector_events", []):
+                self._merge_selector_event(event)
+                self._append_recent_event({"type": "selector", **event})
+            for event in updates.get("decomposer_events", []):
+                self._merge_decomposer_event(event)
+                self._append_recent_event({"type": "decomposer", **event})
 
 
     def get_graph_function(self):
@@ -225,16 +369,13 @@ class MultiAgentsExecutionEngineGraph:
             agent_config = self.agent_config_dict.get(agent_name, None)
             # Read enable_thinking from agent config, default to False
             enable_thinking = False
-    if agent_config:
-        # Read from train_llm_config (enable_thinking is same for train and val)
-        train_llm_config = getattr(agent_config, 'train_llm_config', None)
-        if train_llm_config:
-            enable_thinking = train_llm_config.get('enable_thinking', False)
-        else:
-            # Fallback to old format
-            enable_thinking = getattr(agent_config, 'enable_thinking', False)
+            if agent_config:
+                train_llm_config = getattr(agent_config, 'train_llm_config', None)
+                if train_llm_config:
+                    enable_thinking = train_llm_config.get('enable_thinking', False)
+                else:
+                    enable_thinking = getattr(agent_config, 'enable_thinking', False)
             self.agent_enable_thinking[agent_name] = enable_thinking
-            # Read enable_multimodal from agent config, fallback to global setting
             enable_multimodal = getattr(agent_config, 'enable_multimodal', self.enable_multimodal) if agent_config else self.enable_multimodal
             self.agent_enable_multimodal[agent_name] = enable_multimodal
             print(f"Agent '{agent_name}' enable_thinking: {enable_thinking}, enable_multimodal: {enable_multimodal}")
@@ -269,6 +410,19 @@ class MultiAgentsExecutionEngineGraph:
         self.env_rollout_mapping={}
         for env_idx in range(len(self.env_idx_list)):
             self.env_rollout_mapping[env_idx] = [_ for _ in range(env_idx*self.sample_num, (env_idx+1)*self.sample_num)]
+
+        available_agents = self._collect_available_agents()
+        performance_snapshot = self._snapshot_performance_memory()
+        for env in self.envs:
+            state = getattr(env, "state", None)
+            if state is None:
+                continue
+            state.available_agents = copy.deepcopy(available_agents)
+            state.performance_memory_snapshot = copy.deepcopy(performance_snapshot)
+            state.performance_memory_update = {}
+            state.hop_reward_overrides = {}
+            state.hop_metadata = {}
+
         self.timer.checkpoint("Starting batched env initialization")
  
     async def generate_single_rollout(self, rollout_idx, model_client_dict, rollout_tracking_dict, cpu_per_rollout=None):
@@ -316,6 +470,19 @@ class MultiAgentsExecutionEngineGraph:
         # For code env, reward is based on test pass rate
         final_reward = 0.0
         final_reward = getattr(result_env, 'final_reward', 0.0)
+        state = getattr(result_env, "state", None)
+        raw_hop_reward_overrides = getattr(state, "hop_reward_overrides", {}) if state is not None else {}
+        raw_hop_metadata = getattr(state, "hop_metadata", {}) if state is not None else {}
+        hop_reward_overrides = {
+            int(hop_idx): float(reward)
+            for hop_idx, reward in (raw_hop_reward_overrides or {}).items()
+        }
+        hop_metadata = {
+            int(hop_idx): metadata
+            for hop_idx, metadata in (raw_hop_metadata or {}).items()
+        }
+
+        await self._merge_performance_memory_updates(result_env)
 
         # First, collect all output_dpr and mark env_final_reward
         collected_trajectories = []
@@ -324,7 +491,10 @@ class MultiAgentsExecutionEngineGraph:
                 continue  # Skip trajectories from other rollouts
 
             # Mark env_final_reward in non_tensor_batch for later reward calculation
-            output_dpr.non_tensor_batch["env_final_reward"] = np.array([final_reward])
+            output_dpr.non_tensor_batch["env_final_reward"] = np.array([final_reward], dtype=np.float32)
+
+            for meta_key, meta_value in hop_metadata.get(h_idx, {}).items():
+                output_dpr.non_tensor_batch[meta_key] = self._to_numpy_value(meta_value)
 
             # Handle LoRA if enabled
             agent_name = output_dpr.non_tensor_batch.get("agent_name", [None])[0]
@@ -347,7 +517,11 @@ class MultiAgentsExecutionEngineGraph:
                 'response': response
             })
 
-            collected_trajectories.append((policy_name, output_dpr))
+            if h_idx in hop_reward_overrides:
+                output_dpr.non_tensor_batch["reward"] = np.array([hop_reward_overrides[h_idx]], dtype=np.float32)
+                output_dpr.non_tensor_batch["reward_source"] = np.array(["hop_override"], dtype=object)
+
+            collected_trajectories.append((policy_name, output_dpr, h_idx in hop_reward_overrides))
         
         # Now calculate rewards using the reward calculation function from core_algo
         reward_algorithm = getattr(self.config.training, 'reward_algorithm', 'default')
@@ -357,13 +531,15 @@ class MultiAgentsExecutionEngineGraph:
             'reward_threshold': getattr(self.config.training, 'reward_threshold', 0.5),
         }
         
-        for policy_name, output_dpr in collected_trajectories:
-            # Calculate reward for this trajectory using core_algo
-            output_dpr = calculate_reward(
-                output_dpr, 
-                algorithm=reward_algorithm,
-                **reward_kwargs
-            )
+        for policy_name, output_dpr, has_override_reward in collected_trajectories:
+            if not has_override_reward:
+                output_dpr = calculate_reward(
+                    output_dpr, 
+                    algorithm=reward_algorithm,
+                    **reward_kwargs
+                )
+            elif "reward_source" not in output_dpr.non_tensor_batch:
+                output_dpr.non_tensor_batch["reward_source"] = np.array(["hop_override"], dtype=object)
 
            
             # Concatenate to trajectory dict
@@ -559,4 +735,3 @@ class MultiAgentsExecutionEngineGraph:
         self.rollout_tracking_dict = rollout_tracking_dict
 
         return aggregated_results
-
