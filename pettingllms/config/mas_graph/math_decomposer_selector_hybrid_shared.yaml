@@ -152,6 +152,7 @@ training:
   device: cuda
   total_training_steps: 200
   project_name: pettingllms
+  entity: ${oc.env:WANDB_ENTITY,moska-phd-research}
   experiment_name: math_decomposer_selector_hybrid_shared
   logger:
   - console
