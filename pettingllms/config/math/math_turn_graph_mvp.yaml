@@ -93,7 +93,6 @@ training:
   experiment_name: math_turn_graph_mvp
   logger:
   - console
-  - wandb
   model_checkpoints_dir: checkpoints
   ray_wait_register_center_timeout: 300
   train_batch_size: 16
