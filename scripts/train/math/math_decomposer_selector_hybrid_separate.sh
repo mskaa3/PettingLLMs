@@ -76,7 +76,7 @@ python3 -m pettingllms.trainer.train --config-path ../config/mas_graph --config-
     worker_defaults.trainable=$WORKER_TRAINABLE \
     worker_defaults.optimization_mode=$WORKER_OPTIMIZATION_MODE \
     training.project_name="$WANDB_PROJECT_VALUE" \
-    training.entity="$WANDB_ENTITY_VALUE" \
+    +training.entity="$WANDB_ENTITY_VALUE" \
     training.experiment_name="$WANDB_NAME_VALUE" \
     training.total_training_steps=200 \
     training.train_batch_size=16 \
