@@ -631,16 +631,41 @@ class MultiAgentsPPOTrainer:
         training_entity = OmegaConf.select(self.config, "training.entity", default=None)
         if training_entity in (None, ""):
             training_entity = os.environ.get("WANDB_ENTITY")
+        requested_backends = OmegaConf.to_container(self.config.training.logger, resolve=True)
+        if isinstance(requested_backends, str):
+            requested_backends = [requested_backends]
+        else:
+            requested_backends = list(requested_backends)
         log_dir = os.path.join("logs", experiment_name, date_str, time_str)
         os.makedirs(log_dir, exist_ok=True)
-        
-        logger = Tracking(
-            project_name=self.config.training.project_name,
-            experiment_name=experiment_name,
-            default_backend=self.config.training.logger,
-            entity=training_entity,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
+
+        tracking_config = OmegaConf.to_container(self.config, resolve=True)
+        try:
+            logger = Tracking(
+                project_name=self.config.training.project_name,
+                experiment_name=experiment_name,
+                default_backend=requested_backends,
+                entity=training_entity,
+                config=tracking_config,
+            )
+        except Exception as exc:
+            if any(backend in ("tracking", "wandb") for backend in requested_backends):
+                fallback_backends = [backend for backend in requested_backends if backend not in ("tracking", "wandb")]
+                if not fallback_backends:
+                    fallback_backends = ["console"]
+                colorful_print(
+                    f"W&B logger initialization failed ({exc}). Falling back to backends: {fallback_backends}",
+                    "yellow",
+                )
+                logger = Tracking(
+                    project_name=self.config.training.project_name,
+                    experiment_name=experiment_name,
+                    default_backend=fallback_backends,
+                    entity=training_entity,
+                    config=tracking_config,
+                )
+            else:
+                raise
         
         colorful_print(f"Logger initialized with log_dir: {log_dir}", "cyan")
         return logger

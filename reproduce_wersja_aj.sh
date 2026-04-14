@@ -24,9 +24,10 @@ export NNODES="${NNODES:-${SLURM_NNODES:-2}}"
 export N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
 
 
-export WANDB_ENTITY="moska-phd-research"
-export WANDB_PROJECT="multi-grpo"
-export WANDB_NAME="first_run_qwen8"
+export WANDB_ENTITY="${WANDB_ENTITY:-moska-phd-research}"
+export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
+export WANDB_NAME="${WANDB_NAME:-first_run_qwen8}"
+export WANDB_MODE="${WANDB_MODE:-online}"
 
 ###############################################################################
 # Repo location on host
@@ -111,6 +112,7 @@ export APPTAINERENV_WANDB_API_KEY="${WANDB_API_KEY}"
 export APPTAINERENV_WANDB_ENTITY="${WANDB_ENTITY}"
 export APPTAINERENV_WANDB_PROJECT="${WANDB_PROJECT}"
 export APPTAINERENV_WANDB_NAME="${WANDB_NAME}"
+export APPTAINERENV_WANDB_MODE="${WANDB_MODE}"
 export APPTAINERENV_WANDB_DIR="/tmp/tmpdir/wandb"
 export APPTAINERENV_WANDB_CACHE_DIR="/tmp/tmpdir/wandb/.cache"
 export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
