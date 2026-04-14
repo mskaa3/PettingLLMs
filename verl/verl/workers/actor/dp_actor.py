@@ -358,11 +358,11 @@ class DataParallelPPOActor(BasePPOActor):
         multi_lora = data.meta_info.get("multi_lora", False)
         lora_id = data.meta_info.get("lora_id", 0)
 
-        if multi_lora and hasattr(self.actor_module, 'set_adapter'):
+        if self._is_lora and multi_lora and hasattr(self.actor_module, 'set_adapter'):
             # In multi_lora mode, use lora_1, lora_2, lora_3, ...
             adapter_name = f"lora_{lora_id}"
             self.actor_module.set_adapter(adapter_name)
-        elif not multi_lora and hasattr(self.actor_module, 'set_adapter'):
+        elif self._is_lora and not multi_lora and hasattr(self.actor_module, 'set_adapter'):
             # In single LoRA mode, use "default"
             if "default" in self.actor_module.peft_config:
                 self.actor_module.set_adapter("default")
@@ -512,7 +512,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
         
         adapter_name = self._validate_and_get_adapter(data)
-        if adapter_name and hasattr(self.actor_module, 'set_adapter'):
+        if adapter_name and self._is_lora and hasattr(self.actor_module, 'set_adapter'):
             self.actor_module.set_adapter(adapter_name)
 
         temperature = data.meta_info['temperature']
