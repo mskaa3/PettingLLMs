@@ -351,6 +351,19 @@ class MultiAgentsPPOTrainer:
             return len(batch) > 0
         except Exception:
             return True
+
+    def _batch_has_ppo_metrics(self, batch):
+        if not self._batch_has_samples(batch):
+            return False
+        batch_tensors = getattr(batch, "batch", None)
+        if batch_tensors is None:
+            return False
+        required_keys = {"advantages", "returns"}
+        try:
+            batch_keys = set(batch_tensors.keys())
+        except Exception:
+            return False
+        return required_keys.issubset(batch_keys)
         
 
 
@@ -842,9 +855,16 @@ class MultiAgentsPPOTrainer:
                 if not self._batch_has_samples(batch):
                     colorful_print(f"Skipping metrics for {model_name}: no trainable samples in batch", "yellow")
                     continue
-                for metric_name, metric_value in compute_data_metrics(batch=batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())).items():
-                    metric_name_policy= model_name + "_" + metric_name
-                    metrics[metric_name_policy] = metric_value
+
+                if self._batch_has_ppo_metrics(batch):
+                    for metric_name, metric_value in compute_data_metrics(batch=batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())).items():
+                        metric_name_policy= model_name + "_" + metric_name
+                        metrics[metric_name_policy] = metric_value
+                else:
+                    colorful_print(
+                        f"Skipping PPO data metrics for {model_name}: batch has no advantages/returns (likely frozen or filtered-only agents)",
+                        "yellow",
+                    )
                 
                 for metric_name, metric_value in compute_timing_metrics(batch=batch, timing_raw=timing_raw).items():
                     metric_name_policy= model_name + "_" + metric_name
