@@ -35,7 +35,7 @@ export NNODES="${NNODES:-${SLURM_NNODES:-2}}"
 export N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
 
 
-export WANDB_ENTITY="${WANDB_ENTITY:-moska-phd-research}"
+export WANDB_ENTITY="${WANDB_ENTITY:-julia-moska}"
 export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
 export WANDB_NAME="${WANDB_NAME:-math_decomposer_selector_hybrid_separate}"
 export WANDB_MODE="${WANDB_MODE:-online}"

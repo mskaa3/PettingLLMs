@@ -35,6 +35,9 @@ SELECTOR_TRAINABLE="${SELECTOR_TRAINABLE:-true}"
 SELECTOR_OPTIMIZATION_MODE="${SELECTOR_OPTIMIZATION_MODE:-prompt}"
 WORKER_TRAINABLE="${WORKER_TRAINABLE:-false}"
 WORKER_OPTIMIZATION_MODE="${WORKER_OPTIMIZATION_MODE:-prompt}"
+WANDB_PROJECT_VALUE="${WANDB_PROJECT:-multi-grpo}"
+WANDB_ENTITY_VALUE="${WANDB_ENTITY:-julia-moska}"
+WANDB_NAME_VALUE="${WANDB_NAME:-math_decomposer_selector_hybrid_separate}"
 
 echo "Hybrid separate orchestrator split: TOTAL_GPUS=$TOTAL_GPUS PER_MODEL=$EQUAL_GPUS_PER_MODEL UNUSED_GPUS=$UNUSED_GPUS"
 
@@ -72,8 +75,9 @@ python3 -m pettingllms.trainer.train --config-path ../config/mas_graph --config-
     selector_defaults.optimization_mode=$SELECTOR_OPTIMIZATION_MODE \
     worker_defaults.trainable=$WORKER_TRAINABLE \
     worker_defaults.optimization_mode=$WORKER_OPTIMIZATION_MODE \
-    training.project_name=multi-grpo \
-    training.experiment_name=math_decomposer_selector_hybrid_separate \
+    training.project_name="$WANDB_PROJECT_VALUE" \
+    training.entity="$WANDB_ENTITY_VALUE" \
+    training.experiment_name="$WANDB_NAME_VALUE" \
     training.total_training_steps=200 \
     training.train_batch_size=16 \
     training.train_sample_num=4 \
