@@ -1038,6 +1038,9 @@ class MultiAgentsPPOTrainer:
                 env_state_success_count += 1
         
         env_success_rate = env_state_success_count / total_rollout_num if total_rollout_num > 0 else 0.0
+        fallback_avg_turns = getattr(self.agent_execution_engine, "max_turns", 0)
+        if not fallback_avg_turns or fallback_avg_turns <= 0:
+            fallback_avg_turns = len(getattr(self.agent_execution_engine, "turn_order", [])) or 1
         
         for agent_name in self.agent_execution_engine.turn_order:
             success_rollout_num = len(
@@ -1046,7 +1049,7 @@ class MultiAgentsPPOTrainer:
             if success_rollout_num > 0:
                 success_ave_turn = self.agent_execution_engine.success_ave_turn_dict.get(agent_name, 0)/success_rollout_num
             else:
-                success_ave_turn = self.agent_execution_engine.config.env.max_turns
+                success_ave_turn = fallback_avg_turns
             success_rollout_rate_dict[agent_name] = (
                 success_rollout_num / total_rollout_num if total_rollout_num > 0 else 0.0
             )
