@@ -1080,6 +1080,7 @@ class ActorRolloutRefWorker(Worker):
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None, agent_lora_mapping=None):
         # only support save and load ckpt for actor
         assert self._is_actor
+        lora_num = getattr(self, "lora_num", getattr(self.config, "lora_num", 1))
 
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -1089,7 +1090,7 @@ class ActorRolloutRefWorker(Worker):
             print(f"[rank-{self.rank}]: ===== CHECKPOINT SAVE DEBUG =====")
             print(f"[rank-{self.rank}]: _is_lora={self._is_lora}")
             print(f"[rank-{self.rank}]: isinstance(PeftModel)={isinstance(self.actor_module, PeftModel)}")
-            print(f"[rank-{self.rank}]: lora_num={self.lora_num}")
+            print(f"[rank-{self.rank}]: lora_num={lora_num}")
             print(f"[rank-{self.rank}]: agent_lora_mapping={agent_lora_mapping}")
 
         # For LoRA training, we do NOT save the base model checkpoint
@@ -1112,12 +1113,12 @@ class ActorRolloutRefWorker(Worker):
         if self._is_lora and isinstance(self.actor_module, PeftModel):
             if dist.get_rank() == 0:
                 print(f"[rank-{self.rank}]: DEBUG - Entering LoRA save block")
-                print(f"[rank-{self.rank}]: DEBUG - lora_num={self.lora_num}, agent_lora_mapping={agent_lora_mapping}")
+                print(f"[rank-{self.rank}]: DEBUG - lora_num={lora_num}, agent_lora_mapping={agent_lora_mapping}")
 
             # Multi-LoRA mode: save each agent's LoRA adapter separately
-            if self.lora_num > 1 and agent_lora_mapping is not None:
+            if lora_num > 1 and agent_lora_mapping is not None:
                 if dist.get_rank() == 0:
-                    print(f"[rank-{self.rank}]: Saving {self.lora_num} LoRA adapters for multi-agent training")
+                    print(f"[rank-{self.rank}]: Saving {lora_num} LoRA adapters for multi-agent training")
                 
                 peft_config = {}
                 if dist.get_rank() == 0:
@@ -1132,7 +1133,7 @@ class ActorRolloutRefWorker(Worker):
 
                         # Save each LoRA adapter separately (lora_1, lora_2, lora_3, ...)
                         # IMPORTANT: All ranks must participate in layered_summon_lora_params (FSDP collective operation)
-                        for i in range(1, self.lora_num + 1):
+                        for i in range(1, lora_num + 1):
                             adapter_name = f"lora_{i}"
 
                             # Set active adapter on all ranks
@@ -1216,6 +1217,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False,  agent_lora_mapping=None):
+        lora_num = getattr(self, "lora_num", getattr(self.config, "lora_num", 1))
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -1224,12 +1226,12 @@ class ActorRolloutRefWorker(Worker):
         # Load LoRA adapters if applicable
         if self._is_lora and isinstance(self.actor_module, PeftModel):
             # Multi-LoRA mode: load each LoRA adapter separately
-            if self.lora_num > 1:
+            if lora_num > 1:
                 if dist.get_rank() == 0:
-                    print(f"[rank-{self.rank}]: Loading {self.lora_num} LoRA adapters for multi-agent training")
+                    print(f"[rank-{self.rank}]: Loading {lora_num} LoRA adapters for multi-agent training")
                 
                 # Load each LoRA adapter (lora_1, lora_2, lora_3, ...)
-                for i in range(1, self.lora_num + 1):
+                for i in range(1, lora_num + 1):
                     adapter_name = f"lora_{i}"
                     lora_load_path = os.path.join(local_path, f"lora_adapter_{adapter_name}")
                     
