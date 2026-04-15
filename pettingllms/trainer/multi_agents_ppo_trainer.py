@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import traceback
 import uuid
 from collections import defaultdict
 from functools import reduce
@@ -364,6 +365,24 @@ class MultiAgentsPPOTrainer:
         except Exception:
             return False
         return required_keys.issubset(batch_keys)
+
+    def _scalarize_metric_value(self, metric_value):
+        if isinstance(metric_value, (list, tuple)):
+            if len(metric_value) == 0:
+                return None
+            return float(np.mean(metric_value))
+        if isinstance(metric_value, np.ndarray):
+            if metric_value.size == 0:
+                return None
+            return float(np.mean(metric_value))
+        if hasattr(metric_value, "item"):
+            try:
+                return float(metric_value.item())
+            except Exception:
+                pass
+        if isinstance(metric_value, (int, float, np.floating, np.integer)):
+            return float(metric_value)
+        return metric_value
         
 
 
@@ -808,6 +827,7 @@ class MultiAgentsPPOTrainer:
                             )
                     
                     all_trainer_metrics = {}
+                    overall_trainer_metric_buckets = defaultdict(list)
                     
                     def update_single_trainer(model_name, batch, trainer):
                         
@@ -833,11 +853,22 @@ class MultiAgentsPPOTrainer:
                             
                             # Merge trainer metrics by agent
                             trainer_metrics = result["metrics"]
+                            for metric_name, metric_value in trainer_metrics.items():
+                                scalar_metric_value = self._scalarize_metric_value(metric_value)
+                                if scalar_metric_value is None:
+                                    continue
+                                all_trainer_metrics[f"{model_name}_{metric_name}"] = scalar_metric_value
+                                if isinstance(scalar_metric_value, (int, float)):
+                                    overall_trainer_metric_buckets[metric_name].append(float(scalar_metric_value))
                         
 
                             # Replace the trainer's batch with the updated version for downstream metrics
                             if "updated_batch" in result and result["updated_batch"] is not None:
                                 batch_per_trainer[model_name] = result["updated_batch"]
+
+                    for metric_name, metric_values in overall_trainer_metric_buckets.items():
+                        if metric_values:
+                            all_trainer_metrics[f"overall/{metric_name}"] = float(np.mean(metric_values))
                     
                     metrics.update(all_trainer_metrics)
                     
@@ -851,6 +882,7 @@ class MultiAgentsPPOTrainer:
             # TODO: collect metrics
             # Use the first trainer's batch for metrics calculation
     
+            overall_data_metric_buckets = defaultdict(list)
             for model_name, batch in batch_per_trainer.items():
                 if not self._batch_has_samples(batch):
                     colorful_print(f"Skipping metrics for {model_name}: no trainable samples in batch", "yellow")
@@ -858,8 +890,11 @@ class MultiAgentsPPOTrainer:
 
                 if self._batch_has_ppo_metrics(batch):
                     for metric_name, metric_value in compute_data_metrics(batch=batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())).items():
+                        scalar_metric_value = self._scalarize_metric_value(metric_value)
                         metric_name_policy= model_name + "_" + metric_name
-                        metrics[metric_name_policy] = metric_value
+                        metrics[metric_name_policy] = scalar_metric_value
+                        if isinstance(scalar_metric_value, (int, float)):
+                            overall_data_metric_buckets[metric_name].append(float(scalar_metric_value))
                 else:
                     colorful_print(
                         f"Skipping PPO data metrics for {model_name}: batch has no advantages/returns (likely frozen or filtered-only agents)",
@@ -869,6 +904,10 @@ class MultiAgentsPPOTrainer:
                 for metric_name, metric_value in compute_timing_metrics(batch=batch, timing_raw=timing_raw).items():
                     metric_name_policy= model_name + "_" + metric_name
                     metrics[metric_name_policy] = metric_value
+
+            for metric_name, metric_values in overall_data_metric_buckets.items():
+                if metric_values:
+                    metrics[f"overall/{metric_name}"] = float(np.mean(metric_values))
             
             # Standard data and timing metrics
             #metrics.update(compute_data_metrics(batch=first_batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())))
@@ -955,8 +994,6 @@ class MultiAgentsPPOTrainer:
             colorful_print(f"Current env success rate: {env_success_rate:.4f} (best: {self.best_success_rate:.4f})", "yellow")
             return
 
-        # Update best success rate and save checkpoint
-        self.best_success_rate = env_success_rate
         colorful_print(f"New best env success rate: {env_success_rate:.4f}, saving checkpoint...", "green")
 
         from datetime import datetime
@@ -993,9 +1030,27 @@ class MultiAgentsPPOTrainer:
             for model_name, trainer in self.ppo_trainer_dict.items():
                 save_jobs.append((model_name, trainer))
 
-        # Save each trainer's checkpoint
+        checkpoint_save_failed = False
         for target_name, trainer in save_jobs:
-            trainer._save_checkpoint(save_base=save_base)
+            try:
+                trainer._save_checkpoint(save_base=save_base)
+            except Exception as exc:
+                checkpoint_save_failed = True
+                colorful_print(
+                    f"Checkpoint save failed for '{target_name}' at step {self.global_steps}: {type(exc).__name__}: {exc}",
+                    "red",
+                )
+                traceback.print_exc()
+
+        if checkpoint_save_failed:
+            colorful_print(
+                f"Continuing training without updating best checkpoint marker for env success rate {env_success_rate:.4f}.",
+                "yellow",
+            )
+            return
+
+        self.best_success_rate = env_success_rate
+        colorful_print(f"Checkpoint save completed for env success rate {env_success_rate:.4f}.", "green")
 
 
     def _validate(self, global_steps=0):
