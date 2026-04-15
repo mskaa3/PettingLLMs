@@ -39,6 +39,11 @@ export WANDB_ENTITY="${WANDB_ENTITY:-julia-moska}"
 export WANDB_PROJECT="${WANDB_PROJECT:-multi-grpo}"
 export WANDB_NAME="${WANDB_NAME:-math_decomposer_selector_hybrid_separate}"
 export WANDB_MODE="${WANDB_MODE:-online}"
+export UPLOAD_OUTPUTS="${UPLOAD_OUTPUTS:-1}"
+export UPLOAD_CHECKPOINTS="${UPLOAD_CHECKPOINTS:-1}"
+export DELETE_LOCAL_CHECKPOINTS_AFTER_UPLOAD="${DELETE_LOCAL_CHECKPOINTS_AFTER_UPLOAD:-1}"
+export CHECKPOINT_EXPERIMENT_NAME="${CHECKPOINT_EXPERIMENT_NAME:-${WANDB_NAME}}"
+export CHECKPOINT_DATE="${CHECKPOINT_DATE:-$(date +%Y%m%d)}"
 ###############################################################################
 # Repo location on host
 ###############################################################################
@@ -269,11 +274,57 @@ srun --overlap --nodes=1 --ntasks=1 -w "$head_node" apptainer exec --nv \
 # Collect outputs
 ###############################################################################
 echo "Collecting outputs..."
-if [[ -d "$RUN_ROOT/output" ]]; then
-  echo "Copying outputs to s3v2:$S3_OUTPUT/${SLURM_JOB_ID}/"
-  rclone copy --progress "$RUN_ROOT/output" "s3v2:$S3_OUTPUT/${SLURM_JOB_ID}/"
+REMOTE_JOB_DIR="s3v2:$S3_OUTPUT/${SLURM_JOB_ID}"
+UPLOAD_FAILED=0
+
+upload_dir() {
+  local src_dir="$1"
+  local dest_dir="$2"
+  local label="$3"
+
+  if [[ ! -d "$src_dir" ]]; then
+    echo "Skipping ${label}: directory not found: $src_dir"
+    return 0
+  fi
+
+  echo "Copying ${label} to ${dest_dir}"
+  if ! rclone copy --progress "$src_dir" "$dest_dir"; then
+    echo "WARNING: Failed to upload ${label} from ${src_dir} to ${dest_dir}" >&2
+    UPLOAD_FAILED=1
+    return 1
+  fi
+
+  return 0
+}
+
+if [[ "${UPLOAD_OUTPUTS}" == "1" ]]; then
+  upload_dir "$RUN_ROOT/output" "${REMOTE_JOB_DIR}/" "outputs" || true
+fi
+
+if [[ "${UPLOAD_CHECKPOINTS}" == "1" ]]; then
+  CHECKPOINT_SOURCE="$HOST_REPO_DIR/checkpoints/${CHECKPOINT_DATE}/${CHECKPOINT_EXPERIMENT_NAME}"
+  if [[ ! -d "$CHECKPOINT_SOURCE" ]]; then
+    CHECKPOINT_SOURCE=$(find "$HOST_REPO_DIR/checkpoints" -type d -path "*/${CHECKPOINT_EXPERIMENT_NAME}" 2>/dev/null | sort | tail -n 1 || true)
+  fi
+
+  if [[ -n "${CHECKPOINT_SOURCE:-}" ]]; then
+    CHECKPOINT_DATE_DIR="$(basename "$(dirname "$CHECKPOINT_SOURCE")")"
+    CHECKPOINT_EXPERIMENT_DIR="$(basename "$CHECKPOINT_SOURCE")"
+    if upload_dir "$CHECKPOINT_SOURCE" "${REMOTE_JOB_DIR}/checkpoints/${CHECKPOINT_DATE_DIR}/${CHECKPOINT_EXPERIMENT_DIR}/" "checkpoints"; then
+      if [[ "${DELETE_LOCAL_CHECKPOINTS_AFTER_UPLOAD}" == "1" ]]; then
+        echo "Removing local checkpoint directory: $CHECKPOINT_SOURCE"
+        rm -rf "$CHECKPOINT_SOURCE"
+      fi
+    fi
+  else
+    echo "Skipping checkpoints upload: no checkpoint directory found for experiment ${CHECKPOINT_EXPERIMENT_NAME}"
+  fi
 fi
 
 if [[ -n "${RUN_ROOT:-}" && -d "$RUN_ROOT" ]]; then
   rm -rf "$RUN_ROOT"
+fi
+
+if [[ "$UPLOAD_FAILED" -ne 0 ]]; then
+  exit 1
 fi
