@@ -85,6 +85,9 @@ export LOCAL_TRITON_CACHE="$RUN_ROOT/triton"
 export LOCAL_TORCH_EXTENSIONS="$RUN_ROOT/torch_extensions"
 export LOCAL_APPTAINER_CACHE="$RUN_ROOT/apptainer"
 export LOCAL_OUTPUT="$RUN_ROOT/output"
+export LOCAL_CHECKPOINTS="${LOCAL_CHECKPOINTS:-$RUN_ROOT/checkpoints}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/tmp/tmpdir/checkpoints}"
+export CHECKPOINT_UPLOAD_SOURCE="${CHECKPOINT_UPLOAD_SOURCE:-$LOCAL_CHECKPOINTS}"
 
 mkdir -p \
   "$RUN_ROOT" \
@@ -93,7 +96,8 @@ mkdir -p \
   "$LOCAL_TRITON_CACHE" \
   "$LOCAL_TORCH_EXTENSIONS" \
   "$LOCAL_APPTAINER_CACHE" \
-  "$LOCAL_OUTPUT"
+  "$LOCAL_OUTPUT" \
+  "$LOCAL_CHECKPOINTS"
 
 ###############################################################################
 # Download SIF from S3
@@ -131,6 +135,7 @@ export APPTAINERENV_WANDB_MODE="${WANDB_MODE}"
 export APPTAINERENV_WANDB_DIR="/tmp/tmpdir/wandb"
 export APPTAINERENV_WANDB_CACHE_DIR="/tmp/tmpdir/wandb/.cache"
 export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
+export APPTAINERENV_CHECKPOINT_DIR="${CHECKPOINT_DIR}"
 
 export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
 export APPTAINERENV_TORCH_EXTENSIONS_DIR="/tmp/tmpdir/torch_extensions"
@@ -214,6 +219,7 @@ set -euo pipefail
 cd /workspace/PettingLLMs
 
 mkdir -p /tmp/tmpdir/output
+mkdir -p /tmp/tmpdir/checkpoints
 mkdir -p /tmp/ray
 mkdir -p /tmp/tmpdir/huggingface/transformers
 mkdir -p /tmp/tmpdir/huggingface/hub
@@ -302,8 +308,14 @@ if [[ "${UPLOAD_OUTPUTS}" == "1" ]]; then
 fi
 
 if [[ "${UPLOAD_CHECKPOINTS}" == "1" ]]; then
-  CHECKPOINT_SOURCE="$HOST_REPO_DIR/checkpoints/${CHECKPOINT_DATE}/${CHECKPOINT_EXPERIMENT_NAME}"
+  CHECKPOINT_SOURCE="$CHECKPOINT_UPLOAD_SOURCE/${CHECKPOINT_DATE}/${CHECKPOINT_EXPERIMENT_NAME}"
   if [[ ! -d "$CHECKPOINT_SOURCE" ]]; then
+    CHECKPOINT_SOURCE=$(find "$CHECKPOINT_UPLOAD_SOURCE" -type d -path "*/${CHECKPOINT_EXPERIMENT_NAME}" 2>/dev/null | sort | tail -n 1 || true)
+  fi
+  if [[ ! -d "${CHECKPOINT_SOURCE:-}" ]]; then
+    CHECKPOINT_SOURCE="$HOST_REPO_DIR/checkpoints/${CHECKPOINT_DATE}/${CHECKPOINT_EXPERIMENT_NAME}"
+  fi
+  if [[ ! -d "${CHECKPOINT_SOURCE:-}" ]]; then
     CHECKPOINT_SOURCE=$(find "$HOST_REPO_DIR/checkpoints" -type d -path "*/${CHECKPOINT_EXPERIMENT_NAME}" 2>/dev/null | sort | tail -n 1 || true)
   fi
 
