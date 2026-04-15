@@ -13,7 +13,7 @@ import time
 from tqdm import tqdm
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from pettingllms.trainer.multi_agents_execution_engine import MultiAgentsExecutionEngine
 from verl import DataProto
 #from pettingllms.trainer.multi_agents_execution_engine_graph import MultiAgentsExecutionEngineGraph
