@@ -18,6 +18,7 @@ export LD_LIBRARY_PATH=$CUDA_HOME/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH}
 GPU_num="${GPU_num:-${N_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}}"
 NNODES="${NNODES:-${SLURM_NNODES:-2}}"
+CHECKPOINT_DIR_VALUE="${CHECKPOINT_DIR:-/tmp/tmpdir/checkpoints}"
 
 model_0_config_path="models.model_0.ppo_trainer_config"
 model_0_resource="resource.n_gpus_per_node=$GPU_num resource.nnodes=$NNODES \
@@ -29,6 +30,8 @@ $model_0_config_path.actor_rollout_ref.rollout.tensor_model_parallel_size=$GPU_n
 python3 -m pettingllms.trainer.train --config-path ../config/math --config-name math_L1_prompt \
     $model_0_resource \
     base_models.policy_0.path="Qwen/Qwen3-8B"\
+    training.model_checkpoints_dir="$CHECKPOINT_DIR_VALUE"\
+    +checkpoint_dir="$CHECKPOINT_DIR_VALUE"\
     training.project_name=multi-grpo\
     training.entity=julia-moska\
     training.experiment_name=qwen8b_prompt\

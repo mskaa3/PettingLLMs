@@ -801,8 +801,20 @@ class RayPPOTrainer:
         # path: checkpoints/{experiment_name}/{model_name}/global_step_{global_steps}/actor
         date_time_str = datetime.now().strftime("%Y%m%d")
         experiment_name = getattr(self.config.trainer, 'experiment_name', 'default_experiment')
-        checkpoint_base = getattr(self.config, 'checkpoint_dir', 'checkpoints')
-        experiment_folder = os.path.join(checkpoint_base, date_time_str, experiment_name)
+        checkpoint_base = (
+            getattr(self.config, 'checkpoint_dir', None)
+            or getattr(self.config.trainer, 'default_local_dir', None)
+            or os.environ.get("CHECKPOINT_DIR")
+            or os.environ.get("APPTAINERENV_CHECKPOINT_DIR")
+            or 'checkpoints'
+        )
+        model_name = (
+            getattr(self.config, 'model_name', None)
+            or getattr(self.config.trainer, 'model_name', None)
+            or getattr(self.config, 'name', None)
+            or 'default_model'
+        )
+        experiment_folder = os.path.join(checkpoint_base, date_time_str, experiment_name, model_name)
         
         local_global_step_folder = os.path.join(experiment_folder, f'global_step_{self.global_steps}')
         # Make dirs from this absolute path
@@ -810,7 +822,7 @@ class RayPPOTrainer:
         print(f'local_global_step_folder: {local_global_step_folder}')
         actor_local_path = os.path.join(local_global_step_folder, 'actor')
 
-        actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, experiment_name, f"global_step_{self.global_steps}", "actor")
+        actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, experiment_name, model_name, f"global_step_{self.global_steps}", "actor")
 
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
         if remove_previous_ckpt_in_save:
@@ -835,7 +847,7 @@ class RayPPOTrainer:
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, "critic")
-            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, experiment_name, f"global_step_{self.global_steps}", "critic")
+            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, experiment_name, model_name, f"global_step_{self.global_steps}", "critic")
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep)
 
         # save dataloader
@@ -857,11 +869,41 @@ class RayPPOTrainer:
             raise NotImplementedError("load from hdfs is not implemented yet")
         else:
             experiment_name = getattr(self.config.trainer, 'experiment_name', 'default_experiment')
-            checkpoint_folder = os.path.join('checkpoints', experiment_name)  # TODO: check path
-            if not os.path.isabs(checkpoint_folder):
-                working_dir = os.getcwd()
-                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
-            global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+            checkpoint_base = (
+                getattr(self.config, 'checkpoint_dir', None)
+                or getattr(self.config.trainer, 'default_local_dir', None)
+                or os.environ.get("CHECKPOINT_DIR")
+                or os.environ.get("APPTAINERENV_CHECKPOINT_DIR")
+                or 'checkpoints'
+            )
+            model_name = (
+                getattr(self.config, 'model_name', None)
+                or getattr(self.config.trainer, 'model_name', None)
+                or getattr(self.config, 'name', None)
+                or 'default_model'
+            )
+            date_dirs = []
+            if os.path.isdir(checkpoint_base):
+                date_dirs = sorted(
+                    [
+                        os.path.join(checkpoint_base, entry)
+                        for entry in os.listdir(checkpoint_base)
+                        if os.path.isdir(os.path.join(checkpoint_base, entry))
+                    ]
+                )
+
+            global_step_folder = None
+            for date_dir in reversed(date_dirs):
+                candidate = os.path.join(date_dir, experiment_name, model_name)
+                if os.path.isdir(candidate):
+                    global_step_folder = find_latest_ckpt_path(candidate)
+                    if global_step_folder is not None:
+                        break
+
+            if global_step_folder is None:
+                legacy_checkpoint_folder = os.path.join(checkpoint_base, experiment_name)
+                if os.path.isdir(legacy_checkpoint_folder):
+                    global_step_folder = find_latest_ckpt_path(legacy_checkpoint_folder)
 
         # find global_step_folder
         if self.config.trainer.resume_mode == "auto":

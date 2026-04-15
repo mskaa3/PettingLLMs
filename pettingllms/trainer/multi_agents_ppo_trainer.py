@@ -171,7 +171,25 @@ class MultiAgentsPPOTrainer:
 
     def _configure_model_adaptation(self, ppo_config, policy_name):
         ppo_config.trainer.experiment_name = self.config.training.experiment_name
+        ppo_config.trainer.project_name = self.config.training.project_name
         ppo_config.actor_rollout_ref.model.lora_alpha = self.config.get("lora_alpha", 16)
+
+        checkpoint_root = (
+            OmegaConf.select(self.config, "checkpoint_dir", default=None)
+            or OmegaConf.select(self.config, "training.model_checkpoints_dir", default=None)
+            or os.environ.get("CHECKPOINT_DIR")
+            or os.environ.get("APPTAINERENV_CHECKPOINT_DIR")
+            or getattr(ppo_config.trainer, "default_local_dir", None)
+            or "checkpoints"
+        )
+
+        with open_dict(ppo_config):
+            ppo_config.checkpoint_dir = checkpoint_root
+            ppo_config.model_name = policy_name
+
+        ppo_config.trainer.default_local_dir = checkpoint_root
+        with open_dict(ppo_config.trainer):
+            ppo_config.trainer.model_name = policy_name
 
         lora_agents_for_policy = [
             agent_name
