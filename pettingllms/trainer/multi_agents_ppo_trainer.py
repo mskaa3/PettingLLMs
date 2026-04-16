@@ -662,8 +662,8 @@ class MultiAgentsPPOTrainer:
                     dump_path=rollout_data_dir,
                 )
 
-            # Return the potentially updated batch so caller can keep latest fields
-            return batch
+        # Return the potentially updated batch so caller can keep latest fields
+        return batch
 
     
 

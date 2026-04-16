@@ -14,7 +14,7 @@ set -euo pipefail
 # User-configurable settings
 ###############################################################################
 export SIF_S3="${SIF_S3:-s3min-tomasznaskret-1712063354/user/jmoska/stronger_mas.sif}"
-export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiGRPO/output/}"
+export S3_OUTPUT="${S3_OUTPUT:-s3min-tomasznaskret-1712063354/user/jmoska/MultiGRPO/output}"
 
 export PREPARE_CODE_DATA="${PREPARE_CODE_DATA:-0}"
 export PREPARE_MATH_DATA="${PREPARE_MATH_DATA:-1}"
