@@ -310,9 +310,12 @@ class MultiAgentsExecutionEngineGraph:
         for rollout_idx, tracking_data in sorted(rollout_tracking_dict.items()):
             env_idx = tracking_data['env_idx']
             hops = tracking_data['hops']
+            graph_error = tracking_data.get('graph_error')
 
             print(f"\nRollout {rollout_idx} (Env {env_idx}):")
             print(f"  Total hops: {len(hops)}")
+            if graph_error:
+                print(f"  Graph error: {graph_error.get('error_type')}: {graph_error.get('error')}")
 
             for hop_data in hops:
                 hop_idx = hop_data['hop_idx']
@@ -337,6 +340,7 @@ class MultiAgentsExecutionEngineGraph:
                     str(rollout_idx): {
                         'env_idx': data['env_idx'],
                         'total_hops': len(data['hops']),
+                        'graph_error': data.get('graph_error'),
                         'hops': [
                             {
                                 'hop_idx': hop['hop_idx'],
@@ -462,7 +466,17 @@ class MultiAgentsExecutionEngineGraph:
         # and route them to llm_async_generate, collecting trajectories
 
         # Wrap and run the graph with CPU resource hint
-        result_env = await wrapped_graph(env=env, model_client_dict=model_client_dict)
+        try:
+            result_env = await wrapped_graph(env=env, model_client_dict=model_client_dict)
+        except Exception as exc:
+            rollout_tracking_dict[rollout_idx]["graph_error"] = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "traceback": traceback.format_exc(),
+            }
+            print(f"[GraphRolloutError] rollout={rollout_idx} env={env_idx} error={exc}")
+            print(traceback.format_exc())
+            raise
         # After graph execution, collect trajectories from the patch context
         trajectory_store = get_trajectory_store()
 
@@ -522,6 +536,14 @@ class MultiAgentsExecutionEngineGraph:
                 output_dpr.non_tensor_batch["reward_source"] = np.array(["hop_override"], dtype=object)
 
             collected_trajectories.append((policy_name, output_dpr, h_idx in hop_reward_overrides))
+
+        if not collected_trajectories:
+            state = getattr(result_env, "state", None)
+            hop_metadata_keys = sorted(list(getattr(state, "hop_metadata", {}).keys())) if state is not None else []
+            print(
+                f"[GraphRolloutWarning] rollout={rollout_idx} env={env_idx} completed with no collected trajectories. "
+                f"hop_metadata_keys={hop_metadata_keys}"
+            )
         
         # Now calculate rewards using the reward calculation function from core_algo
         reward_algorithm = getattr(self.config.training, 'reward_algorithm', 'default')

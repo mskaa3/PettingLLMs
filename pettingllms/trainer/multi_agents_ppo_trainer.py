@@ -405,7 +405,9 @@ class MultiAgentsPPOTrainer:
 
 
     def _update_parameters(self, batch, ppo_trainer, timing_raw):
-
+        if not self._batch_has_samples(batch):
+            colorful_print("Warning: Empty batch received, skipping parameter update", "yellow")
+            return batch
 
         # Initialize metrics dictionary if not exists
         if not hasattr(batch, 'meta_info'):
@@ -848,6 +850,19 @@ class MultiAgentsPPOTrainer:
                     overall_trainer_metric_buckets = defaultdict(list)
                     
                     def update_single_trainer(model_name, batch, trainer):
+                        if not self._batch_has_samples(batch):
+                            colorful_print(
+                                f"Skipping parameter update for {model_name}: empty batch returned from rollout collection",
+                                "yellow",
+                            )
+                            return {
+                                "status": "empty_batch",
+                                "model_name": model_name,
+                                "timing": {},
+                                "metrics": {},
+                                "agent_names": None,
+                                "updated_batch": batch,
+                            }
                         
                         local_timing_raw = {}
                         # Keep the updated batch with advantages/returns for later metrics
