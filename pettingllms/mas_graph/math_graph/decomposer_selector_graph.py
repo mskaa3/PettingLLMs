@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from pettingllms.mas_graph.math_graph.math_env import MathEnv
-from pettingllms.utils.openai import get_hop_idx
+from pettingllms.utils.openai import get_hop_idx, get_rollout_idx
+
+
+_TREE_RECORD_WRITE_LOCK = threading.Lock()
 
 
 def extract_answer(text: str) -> str:
@@ -69,6 +75,12 @@ def _config_value(config_obj, key: str, default):
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
     return getattr(config_obj, key, default)
+
+
+def _safe_filename_fragment(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._")
+    return normalized or "experiment"
 
 
 def _clip(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
@@ -514,11 +526,73 @@ def _memory_summary(memory_snapshot: Dict[str, Any], worker_agents: List[Dict[st
     return "\n".join(lines) if lines else "No performance history is available yet."
 
 
+def _resolve_tree_record_path(env: MathEnv) -> str:
+    training_cfg = getattr(env.config, "training", None)
+    experiment_name = _config_value(training_cfg, "experiment_name", "experiment")
+    date_str = datetime.now().strftime("%Y%m%d")
+    output_dir = os.environ.get("OUTPUT_DIR") or os.environ.get("APPTAINERENV_OUTPUT_DIR")
+    if not output_dir:
+        output_dir = "/tmp/tmpdir/output" if os.path.isdir("/tmp/tmpdir") else os.path.abspath("output")
+    os.makedirs(output_dir, exist_ok=True)
+    file_name = f"decomposition_output_{_safe_filename_fragment(experiment_name)}_{date_str}.jsonl"
+    return os.path.join(output_dir, file_name)
+
+
+def _append_tree_record(env: MathEnv, record: Dict[str, Any]) -> None:
+    output_path = _resolve_tree_record_path(env)
+    with _TREE_RECORD_WRITE_LOCK:
+        with open(output_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def _serialize_prior_decomposition_candidates(prior_candidates: List[Dict[str, Any]]) -> str:
+    payload = []
+    for candidate in prior_candidates:
+        decomposition = candidate.get("decomposition", {})
+        payload.append(
+            {
+                "decomposition_id": candidate.get("decomposition_id"),
+                "summary": decomposition.get("summary", ""),
+                "subtasks": [
+                    {
+                        "id": subtask.get("id"),
+                        "title": subtask.get("title"),
+                        "kind": subtask.get("kind"),
+                    }
+                    for subtask in decomposition.get("subtasks", [])
+                ],
+            }
+        )
+    return json.dumps(payload, indent=2)
+
+
+def _serialize_prior_selector_candidates(prior_assignments: List[Dict[str, Any]]) -> str:
+    payload = []
+    for candidate in prior_assignments:
+        payload.append(
+            {
+                "selection_id": candidate.get("selection_id"),
+                "assignments": [
+                    {
+                        "subtask_id": assignment.get("subtask_id"),
+                        "agent_name": assignment.get("agent_name"),
+                    }
+                    for assignment in candidate.get("assignment_plan", {}).get("assignments", [])
+                ],
+                "selector_reward": candidate.get("selector_reward"),
+            }
+        )
+    return json.dumps(payload, indent=2)
+
+
 def _build_decomposer_prompt(
     task: str,
     worker_agents: List[Dict[str, Any]],
     memory_snapshot: Dict[str, Any],
     max_subtasks: int,
+    candidate_index: int = 0,
+    total_candidates: int = 1,
+    prior_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     agent_context = json.dumps(
         [
@@ -531,15 +605,25 @@ def _build_decomposer_prompt(
         ],
         indent=2,
     )
+    prior_candidates = prior_candidates or []
+    prior_candidate_context = ""
+    if prior_candidates:
+        prior_candidate_context = (
+            "Previously proposed decomposition candidates:\n"
+            f"{_serialize_prior_decomposition_candidates(prior_candidates)}\n\n"
+        )
     return (
         "You are the Decomposer in a multi-agent math workflow.\n"
         "Break the task into a dependency-aware DAG of subtasks that fits the available worker agents.\n"
         f"Use at most {max_subtasks} subtasks before any auto-added terminal synthesis.\n"
         "Prefer decompositions that expose meaningful parallel branches when useful, but keep them executable.\n"
+        f"This is decomposition candidate {candidate_index + 1} of {total_candidates}.\n"
+        "When possible, propose a meaningfully different valid decomposition from earlier candidates instead of repeating them.\n"
         "Return JSON only with keys: summary, subtasks.\n"
         "Each subtask must include: id, title, description, depends_on, required_capabilities, expected_output, success_criteria, kind.\n\n"
         f"Task:\n{task}\n\n"
         f"Available worker agents:\n{agent_context}\n\n"
+        f"{prior_candidate_context}"
         f"Historical performance summary:\n{_memory_summary(memory_snapshot, worker_agents)}\n"
     )
 
@@ -549,6 +633,9 @@ def _build_selector_prompt(
     decomposition: Dict[str, Any],
     worker_agents: List[Dict[str, Any]],
     memory_snapshot: Dict[str, Any],
+    candidate_index: int = 0,
+    total_candidates: int = 1,
+    prior_assignments: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     decomposition_view = {
         "summary": decomposition.get("summary", ""),
@@ -568,14 +655,24 @@ def _build_selector_prompt(
         ],
         indent=2,
     )
+    prior_assignments = prior_assignments or []
+    prior_assignment_context = ""
+    if prior_assignments:
+        prior_assignment_context = (
+            "Previously proposed selector candidates for this decomposition:\n"
+            f"{_serialize_prior_selector_candidates(prior_assignments)}\n\n"
+        )
     return (
         "You are the Selector in a multi-agent math workflow.\n"
         "Assign one worker agent to each subtask. Optimize for agent-task fit and historical performance.\n"
+        f"This is selector candidate {candidate_index + 1} of {total_candidates} for the current decomposition.\n"
+        "When possible, produce a different viable assignment from earlier selector candidates.\n"
         "Return JSON only with keys: assignments.\n"
         "Each assignment must include: subtask_id, agent_name, justification.\n\n"
         f"Task:\n{task}\n\n"
         f"Decomposition:\n{json.dumps(decomposition_view, indent=2)}\n\n"
         f"Available worker agents:\n{agent_context}\n\n"
+        f"{prior_assignment_context}"
         f"Historical performance summary:\n{_memory_summary(memory_snapshot, worker_agents)}\n"
     )
 
@@ -708,6 +805,19 @@ def _compute_worker_training_reward(partial_reward: float, final_reward: float, 
     return _clip(partial_weight * partial_reward + final_weight * float(final_reward))
 
 
+def _compute_decomposer_training_reward(
+    heuristic_reward: float,
+    avg_selector_reward: float,
+    orchestration_cfg,
+) -> float:
+    heuristic_weight = float(_config_value(orchestration_cfg, "decomposer_heuristic_reward_weight", 0.45))
+    selector_weight = float(_config_value(orchestration_cfg, "decomposer_selector_reward_weight", 0.55))
+    return _clip(
+        heuristic_weight * float(heuristic_reward) +
+        selector_weight * float(avg_selector_reward)
+    )
+
+
 def _compute_decomposition_reward(
     decomposition: Dict[str, Any],
     worker_agents: List[Dict[str, Any]],
@@ -766,78 +876,44 @@ def _resolve_agent_roles(available_agents: List[Dict[str, Any]]) -> Tuple[str, s
     return decomposer, selector, worker_agents
 
 
-async def math_decomposer_selector_graph(
-    env: Optional[MathEnv] = None,
-    model_client_dict: dict = None,
-    model_client: OpenAIChatCompletionClient = None,
-):
-    if env is None:
-        raise ValueError("math_decomposer_selector_graph requires a MathEnv instance.")
+def _update_hop_metadata(env: MathEnv, hop_idx: Optional[int], **metadata) -> None:
+    if hop_idx is None:
+        return
+    env.state.hop_metadata.setdefault(hop_idx, {}).update(metadata)
 
-    available_agents = list(getattr(env.state, "available_agents", []) or [])
-    memory_snapshot = dict(getattr(env.state, "performance_memory_snapshot", {}) or {})
-    if not available_agents and model_client is not None:
-        available_agents = [{"name": "shared_agent", "role": "worker", "capabilities": ["general_reasoning"], "description": ""}]
-        model_client_dict = {"shared_agent": model_client}
 
-    if model_client_dict is None:
-        raise ValueError("model_client_dict is required for the decomposer/selector workflow.")
+def _branch_sort_key(branch_result: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    avg_partial_reward = sum(branch_result.get("partial_rewards", {}).values()) / float(
+        max(1, len(branch_result.get("partial_rewards", {})))
+    )
+    return (
+        float(branch_result.get("final_reward", 0.0)),
+        float(branch_result.get("selector_reward", 0.0)),
+        avg_partial_reward,
+        1.0 if branch_result.get("final_answer_candidate") else 0.0,
+    )
 
-    decomposer_name, selector_name, worker_agents = _resolve_agent_roles(available_agents)
-    orchestration_cfg = getattr(env.config, "orchestration", None)
-    max_subtasks = int(_config_value(orchestration_cfg, "max_subtasks", 4))
-    require_final_synthesis_subtask = bool(
-        _config_value(orchestration_cfg, "require_final_synthesis_subtask", True)
-    )
-    task = env.state.problem or ""
 
-    decomposer_prompt = _build_decomposer_prompt(
-        task=task,
-        worker_agents=worker_agents,
-        memory_snapshot=memory_snapshot,
-        max_subtasks=max_subtasks,
-    )
-    decomposer_hop = _register_next_hop(
-        env,
-        orchestration_role="decomposer",
-        graph_stage="decompose",
-        logical_agent=decomposer_name,
-    )
-    decomposer_output = await _call_agent(model_client_dict, decomposer_name, decomposer_prompt)
-    decomposition = _validate_decomposition(
-        decomposition=_load_json_response(decomposer_output),
-        task=task,
-        worker_agents=worker_agents,
-        max_subtasks=max_subtasks,
-        require_final_synthesis_subtask=require_final_synthesis_subtask,
-    )
-    env.state.decomposition_graph = decomposition
-
-    selector_prompt = _build_selector_prompt(
-        task=task,
-        decomposition=decomposition,
-        worker_agents=worker_agents,
-        memory_snapshot=memory_snapshot,
-    )
-    selector_hop = _register_next_hop(
-        env,
-        orchestration_role="selector",
-        graph_stage="select",
-        logical_agent=selector_name,
-    )
-    selector_output = await _call_agent(model_client_dict, selector_name, selector_prompt)
-    assignment_plan = _validate_assignment(
-        assignment=_load_json_response(selector_output),
-        decomposition=decomposition,
-        worker_agents=worker_agents,
-        memory_snapshot=memory_snapshot,
-    )
-    env.state.assignment_plan = assignment_plan
-
+async def _execute_assignment_branch(
+    env: MathEnv,
+    model_client_dict: Dict[str, OpenAIChatCompletionClient],
+    task: str,
+    decomposition: Dict[str, Any],
+    assignment_plan: Dict[str, Any],
+    selector_hop: int,
+    worker_agents: List[Dict[str, Any]],
+    orchestration_cfg,
+    ground_truth_answer: str,
+    tree_group_id: int,
+    decomposition_id: str,
+    selection_id: str,
+) -> Dict[str, Any]:
     worker_map = {agent["name"]: agent for agent in worker_agents}
     subtask_outputs: Dict[str, Dict[str, Any]] = {}
     subtask_hops: Dict[str, int] = {}
     execution_trace: List[Dict[str, Any]] = []
+    worker_executions: List[Dict[str, Any]] = []
+    branch_id = f"{decomposition_id}:{selection_id}"
 
     for layer_index, layer in enumerate(decomposition["layers"]):
         for subtask_id in layer:
@@ -863,6 +939,11 @@ async def math_decomposer_selector_graph(
                 logical_agent=worker_name,
                 subtask_id=subtask_id,
                 subtask_type=subtask.get("kind", "reasoning"),
+                tree_group_id=tree_group_id,
+                decomposition_id=decomposition_id,
+                selection_id=selection_id,
+                branch_id=branch_id,
+                grpo_uid=f"worker|tree_{tree_group_id}|{decomposition_id}|{selection_id}|{subtask_id}",
             )
             worker_output = await _call_agent(model_client_dict, worker_name, worker_prompt)
             parsed_output = _parse_worker_output(worker_output)
@@ -884,26 +965,29 @@ async def math_decomposer_selector_graph(
                     "answer_candidate": parsed_output["answer_candidate"],
                 }
             )
+            worker_executions.append(
+                {
+                    "subtask_id": subtask_id,
+                    "hop_idx": hop_idx,
+                    "subtask": subtask,
+                    "assignment": assignment,
+                    "output": subtask_outputs[subtask_id],
+                }
+            )
 
     terminal_subtask_id = decomposition["terminal_subtask_id"]
     terminal_output = subtask_outputs.get(terminal_subtask_id, {})
     final_solution_text = terminal_output.get("raw_output") or terminal_output.get("result", "")
     final_answer_candidate = terminal_output.get("answer_candidate") or extract_answer(final_solution_text)
-    ground_truth_answer = env.state.ground_truth_answer or ""
     final_reward = 1.0 if check_answer_correctness(final_answer_candidate, ground_truth_answer) else 0.0
 
-    env.state.reasoning_generated_solution = final_solution_text
-    env.state.reasoning_generated_solution_history.append(final_solution_text)
-    env.state.reasoning_extracted_answer = final_answer_candidate
-    env.state.reasoning_extracted_answer_history.append(final_answer_candidate)
-    env.state.reasoning_is_correct = bool(final_reward > 0.0)
-    env.state.final_answer_candidate = final_answer_candidate
-    env.state.subtask_results = subtask_outputs
-    env.state.subtask_execution_trace = execution_trace
+    partial_rewards: Dict[str, float] = {}
+    agent_events: List[Dict[str, Any]] = []
+    selector_events: List[Dict[str, Any]] = []
+    partial_reward_success_threshold = float(
+        _config_value(orchestration_cfg, "partial_reward_success_threshold", 0.55)
+    )
 
-    partial_rewards = {}
-    agent_events = []
-    selector_events = []
     for subtask in decomposition["subtasks"]:
         subtask_id = subtask["id"]
         execution = subtask_outputs.get(subtask_id, {})
@@ -917,15 +1001,25 @@ async def math_decomposer_selector_graph(
         )
         partial_rewards[subtask_id] = partial_reward
 
+        success = partial_reward >= partial_reward_success_threshold
+        worker_training_reward = _compute_worker_training_reward(
+            partial_reward=partial_reward,
+            final_reward=final_reward,
+            orchestration_cfg=orchestration_cfg,
+        )
         hop_idx = subtask_hops.get(subtask_id)
         if hop_idx is not None:
-            env.state.hop_reward_overrides[hop_idx] = _compute_worker_training_reward(
+            env.state.hop_reward_overrides[hop_idx] = worker_training_reward
+            _update_hop_metadata(
+                env,
+                hop_idx,
                 partial_reward=partial_reward,
-                final_reward=final_reward,
-                orchestration_cfg=orchestration_cfg,
+                training_reward=worker_training_reward,
+                branch_final_reward=final_reward,
+                branch_answer_candidate=final_answer_candidate,
+                branch_success=success,
             )
 
-        success = partial_reward >= float(_config_value(orchestration_cfg, "partial_reward_success_threshold", 0.55))
         agent_events.append(
             {
                 "agent_name": assignment.get("agent_name"),
@@ -947,35 +1041,330 @@ async def math_decomposer_selector_graph(
             }
         )
 
-    decomposition_reward = _compute_decomposition_reward(
-        decomposition=decomposition,
-        worker_agents=worker_agents,
-        memory_snapshot=memory_snapshot,
-    )
     selector_reward = _compute_selector_reward(
         partial_rewards=partial_rewards,
         assignment_plan=assignment_plan,
         final_reward=final_reward,
         orchestration_cfg=orchestration_cfg,
     )
-
-    env.state.partial_rewards = partial_rewards
-    env.state.decomposition_reward = decomposition_reward
-    env.state.selector_reward = selector_reward
-    env.state.hop_reward_overrides[decomposer_hop] = decomposition_reward
     env.state.hop_reward_overrides[selector_hop] = selector_reward
-    env.state.performance_memory_update = {
+    _update_hop_metadata(
+        env,
+        selector_hop,
+        selector_reward=selector_reward,
+        branch_final_reward=final_reward,
+        branch_answer_candidate=final_answer_candidate,
+        average_partial_reward=(
+            sum(partial_rewards.values()) / float(max(1, len(partial_rewards)))
+            if partial_rewards
+            else 0.0
+        ),
+    )
+
+    return {
+        "decomposition_id": decomposition_id,
+        "selection_id": selection_id,
+        "selector_hop": selector_hop,
+        "assignment_plan": assignment_plan,
+        "subtask_outputs": subtask_outputs,
+        "subtask_hops": subtask_hops,
+        "execution_trace": execution_trace,
+        "worker_executions": worker_executions,
+        "partial_rewards": partial_rewards,
+        "final_solution_text": final_solution_text,
+        "final_answer_candidate": final_answer_candidate,
+        "final_reward": final_reward,
+        "selector_reward": selector_reward,
         "agent_events": agent_events,
         "selector_events": selector_events,
-        "decomposer_events": [
+    }
+
+
+async def math_decomposer_selector_graph(
+    env: Optional[MathEnv] = None,
+    model_client_dict: dict = None,
+    model_client: OpenAIChatCompletionClient = None,
+):
+    if env is None:
+        raise ValueError("math_decomposer_selector_graph requires a MathEnv instance.")
+
+    available_agents = list(getattr(env.state, "available_agents", []) or [])
+    memory_snapshot = dict(getattr(env.state, "performance_memory_snapshot", {}) or {})
+    if not available_agents and model_client is not None:
+        available_agents = [{"name": "shared_agent", "role": "worker", "capabilities": ["general_reasoning"], "description": ""}]
+        model_client_dict = {"shared_agent": model_client}
+
+    if model_client_dict is None:
+        raise ValueError("model_client_dict is required for the decomposer/selector workflow.")
+
+    decomposer_name, selector_name, worker_agents = _resolve_agent_roles(available_agents)
+    orchestration_cfg = getattr(env.config, "orchestration", None)
+    max_subtasks = int(_config_value(orchestration_cfg, "max_subtasks", 4))
+    num_decompositions = max(1, int(_config_value(orchestration_cfg, "num_decompositions", 3)))
+    num_selections_per_decomposition = max(
+        1,
+        int(_config_value(orchestration_cfg, "num_selections_per_decomposition", 3)),
+    )
+    require_final_synthesis_subtask = bool(
+        _config_value(orchestration_cfg, "require_final_synthesis_subtask", True)
+    )
+    task = env.state.problem or ""
+    ground_truth_answer = env.state.ground_truth_answer or ""
+    try:
+        tree_group_id = int(get_rollout_idx())
+    except Exception:
+        tree_group_id = 0
+
+    decomposition_candidates: List[Dict[str, Any]] = []
+    all_branch_results: List[Dict[str, Any]] = []
+    agent_events: List[Dict[str, Any]] = []
+    selector_events: List[Dict[str, Any]] = []
+    decomposer_events: List[Dict[str, Any]] = []
+
+    for decomposition_index in range(num_decompositions):
+        decomposition_id = f"d{decomposition_index}"
+        decomposer_prompt = _build_decomposer_prompt(
+            task=task,
+            worker_agents=worker_agents,
+            memory_snapshot=memory_snapshot,
+            max_subtasks=max_subtasks,
+            candidate_index=decomposition_index,
+            total_candidates=num_decompositions,
+            prior_candidates=decomposition_candidates,
+        )
+        decomposer_hop = _register_next_hop(
+            env,
+            orchestration_role="decomposer",
+            graph_stage="decompose",
+            logical_agent=decomposer_name,
+            tree_group_id=tree_group_id,
+            decomposition_id=decomposition_id,
+            grpo_uid=f"decomposer|tree_{tree_group_id}",
+        )
+        decomposer_output = await _call_agent(model_client_dict, decomposer_name, decomposer_prompt)
+        decomposition = _validate_decomposition(
+            decomposition=_load_json_response(decomposer_output),
+            task=task,
+            worker_agents=worker_agents,
+            max_subtasks=max_subtasks,
+            require_final_synthesis_subtask=require_final_synthesis_subtask,
+        )
+        heuristic_decomposition_reward = _compute_decomposition_reward(
+            decomposition=decomposition,
+            worker_agents=worker_agents,
+            memory_snapshot=memory_snapshot,
+        )
+
+        selector_candidate_results: List[Dict[str, Any]] = []
+        for selection_index in range(num_selections_per_decomposition):
+            selection_id = f"s{selection_index}"
+            selector_prompt = _build_selector_prompt(
+                task=task,
+                decomposition=decomposition,
+                worker_agents=worker_agents,
+                memory_snapshot=memory_snapshot,
+                candidate_index=selection_index,
+                total_candidates=num_selections_per_decomposition,
+                prior_assignments=selector_candidate_results,
+            )
+            selector_hop = _register_next_hop(
+                env,
+                orchestration_role="selector",
+                graph_stage="select",
+                logical_agent=selector_name,
+                tree_group_id=tree_group_id,
+                decomposition_id=decomposition_id,
+                selection_id=selection_id,
+                branch_id=f"{decomposition_id}:{selection_id}",
+                grpo_uid=f"selector|tree_{tree_group_id}|{decomposition_id}",
+            )
+            selector_output = await _call_agent(model_client_dict, selector_name, selector_prompt)
+            assignment_plan = _validate_assignment(
+                assignment=_load_json_response(selector_output),
+                decomposition=decomposition,
+                worker_agents=worker_agents,
+                memory_snapshot=memory_snapshot,
+            )
+
+            branch_result = await _execute_assignment_branch(
+                env=env,
+                model_client_dict=model_client_dict,
+                task=task,
+                decomposition=decomposition,
+                assignment_plan=assignment_plan,
+                selector_hop=selector_hop,
+                worker_agents=worker_agents,
+                orchestration_cfg=orchestration_cfg,
+                ground_truth_answer=ground_truth_answer,
+                tree_group_id=tree_group_id,
+                decomposition_id=decomposition_id,
+                selection_id=selection_id,
+            )
+            branch_result["selector_prompt"] = selector_prompt
+            branch_result["selector_raw_output"] = selector_output
+            selector_candidate_results.append(branch_result)
+            all_branch_results.append(
+                {
+                    **branch_result,
+                    "decomposition": decomposition,
+                    "heuristic_decomposition_reward": heuristic_decomposition_reward,
+                }
+            )
+            agent_events.extend(branch_result["agent_events"])
+            selector_events.extend(branch_result["selector_events"])
+
+        avg_selector_reward = sum(
+            candidate["selector_reward"] for candidate in selector_candidate_results
+        ) / float(max(1, len(selector_candidate_results)))
+        decomposer_reward = _compute_decomposer_training_reward(
+            heuristic_reward=heuristic_decomposition_reward,
+            avg_selector_reward=avg_selector_reward,
+            orchestration_cfg=orchestration_cfg,
+        )
+        env.state.hop_reward_overrides[decomposer_hop] = decomposer_reward
+        _update_hop_metadata(
+            env,
+            decomposer_hop,
+            heuristic_decomposition_reward=heuristic_decomposition_reward,
+            average_selector_reward=avg_selector_reward,
+            decomposer_reward=decomposer_reward,
+            num_subtasks=len(decomposition.get("subtasks", [])),
+            valid_decomposition=decomposition.get("valid", False),
+        )
+
+        decomposition_candidates.append(
             {
-                "reward": decomposition_reward,
+                "decomposition_id": decomposition_id,
+                "decomposer_hop": decomposer_hop,
+                "decomposer_prompt": decomposer_prompt,
+                "raw_output": decomposer_output,
+                "decomposition": decomposition,
+                "heuristic_decomposition_reward": heuristic_decomposition_reward,
+                "avg_selector_reward": avg_selector_reward,
+                "decomposer_reward": decomposer_reward,
+                "selector_candidates": selector_candidate_results,
+            }
+        )
+        decomposer_events.append(
+            {
+                "reward": decomposer_reward,
                 "num_subtasks": len(decomposition.get("subtasks", [])),
                 "valid": decomposition.get("valid", False),
             }
-        ],
+        )
+
+    if not all_branch_results:
+        env.state.final_reward = 0.0
+        env.final_reward = 0.0
+        return env
+
+    best_branch = max(all_branch_results, key=_branch_sort_key)
+    best_decomposition_entry = next(
+        (
+            candidate
+            for candidate in decomposition_candidates
+            if candidate["decomposition_id"] == best_branch["decomposition_id"]
+        ),
+        decomposition_candidates[0],
+    )
+
+    env.state.decomposition_graph = best_decomposition_entry["decomposition"]
+    env.state.decomposition_candidates = [
+        {
+            "decomposition_id": candidate["decomposition_id"],
+            "heuristic_decomposition_reward": candidate["heuristic_decomposition_reward"],
+            "avg_selector_reward": candidate["avg_selector_reward"],
+            "decomposer_reward": candidate["decomposer_reward"],
+            "summary": candidate["decomposition"].get("summary", ""),
+            "selector_candidates": [
+                {
+                    "selection_id": branch["selection_id"],
+                    "selector_reward": branch["selector_reward"],
+                    "final_reward": branch["final_reward"],
+                    "final_answer_candidate": branch["final_answer_candidate"],
+                    "assignments": branch["assignment_plan"].get("assignments", []),
+                }
+                for branch in candidate["selector_candidates"]
+            ],
+        }
+        for candidate in decomposition_candidates
+    ]
+    env.state.assignment_plan = best_branch["assignment_plan"]
+    env.state.subtask_results = best_branch["subtask_outputs"]
+    env.state.subtask_execution_trace = best_branch["execution_trace"]
+    env.state.partial_rewards = best_branch["partial_rewards"]
+    env.state.decomposition_reward = best_decomposition_entry["decomposer_reward"]
+    env.state.selector_reward = best_branch["selector_reward"]
+    env.state.final_answer_candidate = best_branch["final_answer_candidate"]
+    env.state.best_branch_summary = {
+        "tree_group_id": tree_group_id,
+        "decomposition_id": best_branch["decomposition_id"],
+        "selection_id": best_branch["selection_id"],
+        "heuristic_decomposition_reward": best_decomposition_entry["heuristic_decomposition_reward"],
+        "avg_selector_reward": best_decomposition_entry["avg_selector_reward"],
+        "decomposer_reward": best_decomposition_entry["decomposer_reward"],
+        "selector_reward": best_branch["selector_reward"],
+        "final_reward": best_branch["final_reward"],
+        "final_answer_candidate": best_branch["final_answer_candidate"],
     }
 
-    env.state.final_reward = final_reward
-    env.final_reward = final_reward
+    env.state.reasoning_generated_solution = best_branch["final_solution_text"]
+    env.state.reasoning_generated_solution_history.append(best_branch["final_solution_text"])
+    env.state.reasoning_extracted_answer = best_branch["final_answer_candidate"]
+    env.state.reasoning_extracted_answer_history.append(best_branch["final_answer_candidate"])
+    env.state.reasoning_is_correct = bool(best_branch["final_reward"] > 0.0)
+
+    env.state.performance_memory_update = {
+        "agent_events": agent_events,
+        "selector_events": selector_events,
+        "decomposer_events": decomposer_events,
+    }
+    env.state.final_reward = max(branch["final_reward"] for branch in all_branch_results)
+    env.final_reward = env.state.final_reward
+
+    tree_record = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "experiment_name": _config_value(getattr(env.config, "training", None), "experiment_name", "experiment"),
+        "rollout_tree_id": tree_group_id,
+        "task_prompt": task,
+        "ground_truth_answer": ground_truth_answer,
+        "num_decompositions": num_decompositions,
+        "num_selections_per_decomposition": num_selections_per_decomposition,
+        "best_branch_summary": env.state.best_branch_summary,
+        "final_reward": env.state.final_reward,
+        "decomposition_candidates": [
+            {
+                "decomposition_id": candidate["decomposition_id"],
+                "decomposer_hop": candidate["decomposer_hop"],
+                "decomposer_prompt": candidate.get("decomposer_prompt", ""),
+                "decomposer_raw_output": candidate.get("raw_output", ""),
+                "decomposition": candidate["decomposition"],
+                "heuristic_decomposition_reward": candidate["heuristic_decomposition_reward"],
+                "avg_selector_reward": candidate["avg_selector_reward"],
+                "decomposer_reward": candidate["decomposer_reward"],
+                "selector_candidates": [
+                    {
+                        "selection_id": branch["selection_id"],
+                        "selector_hop": branch["selector_hop"],
+                        "selector_prompt": branch.get("selector_prompt", ""),
+                        "selector_raw_output": branch.get("selector_raw_output", ""),
+                        "assignment_plan": branch["assignment_plan"],
+                        "worker_executions": branch.get("worker_executions", []),
+                        "execution_trace": branch["execution_trace"],
+                        "partial_rewards": branch["partial_rewards"],
+                        "selector_reward": branch["selector_reward"],
+                        "final_solution_text": branch["final_solution_text"],
+                        "final_answer_candidate": branch["final_answer_candidate"],
+                        "final_reward": branch["final_reward"],
+                    }
+                    for branch in candidate["selector_candidates"]
+                ],
+            }
+            for candidate in decomposition_candidates
+        ],
+    }
+    try:
+        _append_tree_record(env, tree_record)
+    except Exception as exc:
+        print(f"[decomposer_selector_graph] Failed to append decomposition tree record: {exc}")
     return env

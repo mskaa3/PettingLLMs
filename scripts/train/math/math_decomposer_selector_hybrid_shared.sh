@@ -36,6 +36,8 @@ WANDB_PROJECT_VALUE="${WANDB_PROJECT:-multi-grpo}"
 WANDB_ENTITY_VALUE="${WANDB_ENTITY:-julia-moska}"
 WANDB_NAME_VALUE="${WANDB_NAME:-math_decomposer_selector_hybrid_shared}"
 CHECKPOINT_DIR_VALUE="${CHECKPOINT_DIR:-/tmp/tmpdir/checkpoints}"
+NUM_DECOMPOSITIONS_VALUE="${NUM_DECOMPOSITIONS:-3}"
+NUM_SELECTIONS_PER_DECOMPOSITION_VALUE="${NUM_SELECTIONS_PER_DECOMPOSITION:-3}"
 
 
 echo "Hybrid shared orchestrator split: TOTAL_GPUS=$TOTAL_GPUS PER_MODEL=$EQUAL_GPUS_PER_MODEL UNUSED_GPUS=$UNUSED_GPUS"
@@ -64,6 +66,8 @@ python3 -m pettingllms.trainer.train --config-path ../config/mas_graph --config-
     orchestrator_defaults.optimization_mode=$ORCHESTRATOR_OPTIMIZATION_MODE \
     worker_defaults.trainable=$WORKER_TRAINABLE \
     worker_defaults.optimization_mode=$WORKER_OPTIMIZATION_MODE \
+    orchestration.num_decompositions=$NUM_DECOMPOSITIONS_VALUE \
+    orchestration.num_selections_per_decomposition=$NUM_SELECTIONS_PER_DECOMPOSITION_VALUE \
     training.model_checkpoints_dir="$CHECKPOINT_DIR_VALUE" \
     +checkpoint_dir="$CHECKPOINT_DIR_VALUE" \
     training.project_name="$WANDB_PROJECT_VALUE" \

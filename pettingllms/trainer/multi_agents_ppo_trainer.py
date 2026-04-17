@@ -1179,31 +1179,45 @@ class MultiAgentsPPOTrainer:
         uid_reward_groups = defaultdict(list)
 
         non_tensor_batch = data_proto.non_tensor_batch
-        
-        if not all(key in non_tensor_batch for key in ["env_idx", "turn_idx", "agent_idx"]):
+
+        explicit_grpo_uids = non_tensor_batch.get("grpo_uid")
+        use_explicit_grpo_uid = explicit_grpo_uids is not None and len(explicit_grpo_uids) == len(data_proto)
+
+        if not use_explicit_grpo_uid and not all(key in non_tensor_batch for key in ["env_idx", "turn_idx", "agent_idx"]):
             # If required keys are missing, just assign random UIDs and return
             data_proto.non_tensor_batch["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(data_proto))], dtype=object
             )
             return data_proto
-        
-        rollout_indices = non_tensor_batch["env_idx"]
-        turn_indices = non_tensor_batch["turn_idx"] 
-        agent_indices = non_tensor_batch["agent_idx"]
+
+        if "rollout_idx" in non_tensor_batch:
+            rollout_indices = non_tensor_batch["rollout_idx"]
+        else:
+            rollout_indices = non_tensor_batch["env_idx"]
+        turn_indices = non_tensor_batch.get("turn_idx", np.zeros(len(data_proto), dtype=object))
+        agent_indices = non_tensor_batch.get("agent_idx", np.zeros(len(data_proto), dtype=object))
         rewards = non_tensor_batch.get("reward", [])
-        
-        print(f"[DEBUG UID] Input: len={len(data_proto)}, rollout_mode={rollout_mode}, sample_num={sample_num}")
+
+        print(
+            f"[DEBUG UID] Input: len={len(data_proto)}, rollout_mode={rollout_mode}, "
+            f"sample_num={sample_num}, explicit_grpo_uid={use_explicit_grpo_uid}"
+        )
         print(f"[DEBUG UID] Rewards: len={len(rewards)}, mean={np.mean(rewards) if len(rewards) > 0 else 'N/A'}, nonzero={np.count_nonzero(rewards) if len(rewards) > 0 else 0}")
         
         uids = []
         for i in range(len(data_proto)):
-            if rollout_mode == "no_tree":
+            if use_explicit_grpo_uid:
+                uid = str(explicit_grpo_uids[i])
+            elif rollout_mode == "no_tree":
                 key = (rollout_indices[i],)
+                if key not in uid_mapping:
+                    uid_mapping[key] = str(uuid.uuid4())
+                uid = uid_mapping[key]
             else:
                 key = (rollout_indices[i]//sample_num, turn_indices[i], agent_indices[i])
-            if key not in uid_mapping:
-                uid_mapping[key] = str(uuid.uuid4())
-            uid = uid_mapping[key]
+                if key not in uid_mapping:
+                    uid_mapping[key] = str(uuid.uuid4())
+                uid = uid_mapping[key]
             uids.append(uid)
             
             if len(rewards) > 0 and filter_ratio > 0:

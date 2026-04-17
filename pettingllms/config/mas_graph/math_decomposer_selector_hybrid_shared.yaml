@@ -22,8 +22,12 @@ env:
   batched_init: true
 
 orchestration:
+  num_decompositions: 3
+  num_selections_per_decomposition: 3
   max_subtasks: 4
   require_final_synthesis_subtask: true
+  decomposer_heuristic_reward_weight: 0.45
+  decomposer_selector_reward_weight: 0.55
   selector_final_reward_weight: 0.40
   selector_partial_reward_weight: 0.35
   selector_compatibility_weight: 0.25

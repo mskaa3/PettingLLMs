@@ -27,9 +27,11 @@ class MathEnvState:
     code_extracted_answer_history: List = field(default_factory=list)
     available_agents: List[Dict[str, Any]] = field(default_factory=list)
     decomposition_graph: Dict[str, Any] = field(default_factory=dict)
+    decomposition_candidates: List[Dict[str, Any]] = field(default_factory=list)
     assignment_plan: Dict[str, Any] = field(default_factory=dict)
     subtask_results: Dict[str, Any] = field(default_factory=dict)
     subtask_execution_trace: List[Dict[str, Any]] = field(default_factory=list)
+    best_branch_summary: Dict[str, Any] = field(default_factory=dict)
     partial_rewards: Dict[str, float] = field(default_factory=dict)
     hop_reward_overrides: Dict[int, float] = field(default_factory=dict)
     hop_metadata: Dict[int, Dict[str, Any]] = field(default_factory=dict)
@@ -78,9 +80,11 @@ class MathEnv(Env):
         self.state.code_extracted_answer_history = []
         self.state.available_agents = []
         self.state.decomposition_graph = {}
+        self.state.decomposition_candidates = []
         self.state.assignment_plan = {}
         self.state.subtask_results = {}
         self.state.subtask_execution_trace = []
+        self.state.best_branch_summary = {}
         self.state.partial_rewards = {}
         self.state.hop_reward_overrides = {}
         self.state.hop_metadata = {}
