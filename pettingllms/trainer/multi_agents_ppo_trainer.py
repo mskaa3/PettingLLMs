@@ -427,6 +427,199 @@ class MultiAgentsPPOTrainer:
         metrics["train/policies_with_ppo_metrics"] = float(total_policies_with_ppo_metrics)
         metrics["train/no_trainable_samples"] = 1.0 if total_trainable_samples == 0 else 0.0
         return metrics
+
+    def _select_batch_by_role(self, batch, role_name: str):
+        if not self._batch_has_samples(batch):
+            return None
+        non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
+        role_values = non_tensor_batch.get("orchestration_role")
+        if role_values is None or len(role_values) != len(batch):
+            return None
+        mask = np.array([str(value) == role_name for value in role_values], dtype=bool)
+        if not mask.any():
+            return None
+        return batch.select_idxs(mask)
+
+    def _extract_numeric_non_tensor_values(self, batch, key: str):
+        non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
+        raw_values = non_tensor_batch.get(key)
+        if raw_values is None:
+            return None
+
+        numeric_values = []
+        for raw_value in raw_values:
+            value = raw_value
+            if isinstance(value, np.ndarray) and value.size == 1:
+                try:
+                    value = value.item()
+                except Exception:
+                    pass
+            if isinstance(value, (list, tuple)) and len(value) == 1:
+                value = value[0]
+            if isinstance(value, (bool, np.bool_)):
+                numeric_values.append(float(value))
+                continue
+            try:
+                numeric_values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+
+        if not numeric_values:
+            return None
+        return np.asarray(numeric_values, dtype=np.float32)
+
+    def _role_metadata_alias(self, meta_key: str) -> str:
+        alias_map = {
+            "decomposer_reward": "decomposition/training_reward",
+            "heuristic_decomposition_reward": "decomposition/heuristic_reward",
+            "average_selector_reward": "decomposition/avg_selector_reward",
+            "selector_reward": "selection/training_reward",
+            "average_partial_reward": "selection/avg_partial_reward",
+            "branch_final_reward": "selection/final_task_reward",
+            "partial_reward": "execution/partial_reward",
+            "training_reward": "execution/training_reward",
+            "num_subtasks": "decomposition/num_subtasks",
+            "valid_decomposition": "decomposition/valid_rate",
+            "branch_success": "selection/success_rate",
+        }
+        return alias_map.get(meta_key, f"metadata/{meta_key}")
+
+    def _rename_role_data_metric(self, metric_name: str) -> str:
+        explicit_map = {
+            "critic/vf_explained_var": "value/explained_variance",
+        }
+        if metric_name in explicit_map:
+            return explicit_map[metric_name]
+
+        if metric_name.startswith("critic/score/"):
+            suffix = metric_name.removeprefix("critic/score/")
+            return f"outcome/score/{suffix}"
+        if metric_name.startswith("critic/rewards/"):
+            suffix = metric_name.removeprefix("critic/rewards/")
+            return f"training_reward/sequence/{suffix}"
+        if metric_name.startswith("critic/advantages/"):
+            suffix = metric_name.removeprefix("critic/advantages/")
+            return f"grpo/advantage/{suffix}"
+        if metric_name.startswith("critic/returns/"):
+            suffix = metric_name.removeprefix("critic/returns/")
+            return f"grpo/return/{suffix}"
+        if metric_name.startswith("critic/values/"):
+            suffix = metric_name.removeprefix("critic/values/")
+            return f"value/{suffix}"
+        if metric_name.startswith("response_length/"):
+            suffix = metric_name.removeprefix("response_length/")
+            return f"generation/response_length/{suffix}"
+        if metric_name.startswith("prompt_length/"):
+            suffix = metric_name.removeprefix("prompt_length/")
+            return f"generation/prompt_length/{suffix}"
+        return metric_name
+
+    def _compute_role_metrics(self, batch, policy_name: str, use_critic: bool):
+        metrics = {}
+        aggregate_buckets = defaultdict(list)
+        if not self._batch_has_samples(batch):
+            return metrics, aggregate_buckets
+
+        non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
+        role_values = non_tensor_batch.get("orchestration_role")
+        if role_values is None or len(role_values) != len(batch):
+            return metrics, aggregate_buckets
+
+        unique_roles = sorted({str(value) for value in role_values if value is not None})
+        metadata_keys = [
+            "decomposer_reward",
+            "heuristic_decomposition_reward",
+            "average_selector_reward",
+            "selector_reward",
+            "average_partial_reward",
+            "branch_final_reward",
+            "partial_reward",
+            "training_reward",
+            "num_subtasks",
+            "valid_decomposition",
+            "branch_success",
+        ]
+
+        for role_name in unique_roles:
+            role_batch = self._select_batch_by_role(batch, role_name)
+            if role_batch is None or not self._batch_has_samples(role_batch):
+                continue
+
+            role_prefix = f"role/{policy_name}/{role_name}"
+            role_aggregate_prefix = f"roles/{role_name}"
+
+            role_sample_count = float(len(role_batch))
+            metrics[f"{role_prefix}/samples/count"] = role_sample_count
+            aggregate_buckets[f"{role_aggregate_prefix}/samples/count"].append(role_sample_count)
+
+            grpo_uids = role_batch.non_tensor_batch.get("grpo_uid")
+            if grpo_uids is None:
+                grpo_uids = role_batch.non_tensor_batch.get("uid")
+            if grpo_uids is not None and len(grpo_uids) == len(role_batch):
+                uid_array = np.asarray([str(uid) for uid in grpo_uids], dtype=object)
+                unique_uids, uid_counts = np.unique(uid_array, return_counts=True)
+                group_count = float(len(unique_uids))
+                avg_group_size = float(np.mean(uid_counts)) if len(uid_counts) > 0 else 0.0
+                max_group_size = float(np.max(uid_counts)) if len(uid_counts) > 0 else 0.0
+                metrics[f"{role_prefix}/grpo/group_count"] = group_count
+                metrics[f"{role_prefix}/grpo/group_size_mean"] = avg_group_size
+                metrics[f"{role_prefix}/grpo/group_size_max"] = max_group_size
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/group_count"].append(group_count)
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/group_size_mean"].append(avg_group_size)
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/group_size_max"].append(max_group_size)
+
+            reward_values = self._extract_numeric_non_tensor_values(role_batch, "reward")
+            if reward_values is not None:
+                reward_mean = float(np.mean(reward_values))
+                reward_std = float(np.std(reward_values)) if reward_values.size > 1 else 0.0
+                metrics[f"{role_prefix}/training_reward/mean"] = reward_mean
+                metrics[f"{role_prefix}/training_reward/std"] = reward_std
+                aggregate_buckets[f"{role_aggregate_prefix}/training_reward/mean"].append(reward_mean)
+                aggregate_buckets[f"{role_aggregate_prefix}/training_reward/std"].append(reward_std)
+
+            for meta_key in metadata_keys:
+                numeric_values = self._extract_numeric_non_tensor_values(role_batch, meta_key)
+                if numeric_values is None:
+                    continue
+                mean_value = float(np.mean(numeric_values))
+                std_value = float(np.std(numeric_values)) if numeric_values.size > 1 else 0.0
+                alias = self._role_metadata_alias(meta_key)
+                metrics[f"{role_prefix}/{alias}/mean"] = mean_value
+                metrics[f"{role_prefix}/{alias}/std"] = std_value
+                aggregate_buckets[f"{role_aggregate_prefix}/{alias}/mean"].append(mean_value)
+                aggregate_buckets[f"{role_aggregate_prefix}/{alias}/std"].append(std_value)
+
+            if self._batch_has_ppo_metrics(role_batch):
+                role_data_metrics = compute_data_metrics(batch=role_batch, use_critic=use_critic)
+                for metric_name, metric_value in role_data_metrics.items():
+                    scalar_metric_value = self._scalarize_metric_value(metric_value)
+                    if scalar_metric_value is None:
+                        continue
+                    renamed_metric = self._rename_role_data_metric(metric_name)
+                    metrics[f"{role_prefix}/{renamed_metric}"] = scalar_metric_value
+                    if isinstance(scalar_metric_value, (int, float)):
+                        aggregate_buckets[f"{role_aggregate_prefix}/{renamed_metric}"].append(float(scalar_metric_value))
+
+                advantages = role_batch.batch["advantages"]
+                returns = role_batch.batch["returns"]
+                response_mask = role_batch.batch["response_mask"].bool()
+                seq_advantages = (advantages * response_mask).sum(dim=-1)
+                seq_returns = (returns * response_mask).sum(dim=-1)
+                adv_nonzero_fraction = float((seq_advantages.abs() > 1e-8).float().mean().detach().item())
+                ret_nonzero_fraction = float((seq_returns.abs() > 1e-8).float().mean().detach().item())
+                adv_std = float(seq_advantages.float().std(unbiased=False).detach().item()) if seq_advantages.numel() > 1 else 0.0
+                ret_std = float(seq_returns.float().std(unbiased=False).detach().item()) if seq_returns.numel() > 1 else 0.0
+
+                metrics[f"{role_prefix}/grpo/advantage_nonzero_fraction"] = adv_nonzero_fraction
+                metrics[f"{role_prefix}/grpo/advantage_sequence_std"] = adv_std
+                metrics[f"{role_prefix}/grpo/return_nonzero_fraction"] = ret_nonzero_fraction
+                metrics[f"{role_prefix}/grpo/return_sequence_std"] = ret_std
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/advantage_nonzero_fraction"].append(adv_nonzero_fraction)
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/advantage_sequence_std"].append(adv_std)
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/return_nonzero_fraction"].append(ret_nonzero_fraction)
+                aggregate_buckets[f"{role_aggregate_prefix}/grpo/return_sequence_std"].append(ret_std)
+
+        return metrics, aggregate_buckets
         
     def _batch_has_samples(self, batch):
         if batch is None or getattr(batch, "batch", None) is None:
@@ -996,13 +1189,15 @@ class MultiAgentsPPOTrainer:
             # Use the first trainer's batch for metrics calculation
     
             overall_data_metric_buckets = defaultdict(list)
+            overall_role_metric_buckets = defaultdict(list)
+            use_critic_for_metrics = any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())
             for model_name, batch in batch_per_trainer.items():
                 if not self._batch_has_samples(batch):
                     colorful_print(f"Skipping metrics for {model_name}: no trainable samples in batch", "yellow")
                     continue
 
                 if self._batch_has_ppo_metrics(batch):
-                    for metric_name, metric_value in compute_data_metrics(batch=batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())).items():
+                    for metric_name, metric_value in compute_data_metrics(batch=batch, use_critic=use_critic_for_metrics).items():
                         scalar_metric_value = self._scalarize_metric_value(metric_value)
                         metric_name_policy= model_name + "_" + metric_name
                         metrics[metric_name_policy] = scalar_metric_value
@@ -1018,9 +1213,21 @@ class MultiAgentsPPOTrainer:
                     metric_name_policy= model_name + "_" + metric_name
                     metrics[metric_name_policy] = metric_value
 
+                role_metrics, role_metric_buckets = self._compute_role_metrics(
+                    batch=batch,
+                    policy_name=model_name,
+                    use_critic=use_critic_for_metrics,
+                )
+                metrics.update(role_metrics)
+                for metric_name, metric_values in role_metric_buckets.items():
+                    overall_role_metric_buckets[metric_name].extend(metric_values)
+
             for metric_name, metric_values in overall_data_metric_buckets.items():
                 if metric_values:
                     metrics[f"overall/{metric_name}"] = float(np.mean(metric_values))
+            for metric_name, metric_values in overall_role_metric_buckets.items():
+                if metric_values:
+                    metrics[metric_name] = float(np.mean(metric_values))
             
             # Standard data and timing metrics
             #metrics.update(compute_data_metrics(batch=first_batch, use_critic=any(trainer.use_critic for trainer in self.ppo_trainer_dict.values())))
