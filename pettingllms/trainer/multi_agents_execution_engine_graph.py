@@ -109,6 +109,7 @@ class MultiAgentsExecutionEngineGraph:
         self.server_address_dict = server_address_dict 
         self.chat_parser_dict={}
         self.rollout_latency_dict = {}
+        self.last_rollout_summary = {}
         self.performance_memory = self._initialize_performance_memory()
         self._performance_memory_lock = asyncio.Lock()
         self.timer.checkpoint("MultiAgentsExecutionEngine initialization completed")
@@ -163,6 +164,14 @@ class MultiAgentsExecutionEngineGraph:
         if isinstance(value, float):
             return np.array([value], dtype=np.float32)
         return np.array([value], dtype=object)
+
+    def _dataproto_len(self, data_proto):
+        if data_proto is None or getattr(data_proto, "batch", None) is None:
+            return 0
+        try:
+            return len(data_proto)
+        except Exception:
+            return 0
 
     def _append_recent_event(self, event):
         recent_events = self.performance_memory.setdefault("recent_events", [])
@@ -574,6 +583,47 @@ class MultiAgentsExecutionEngineGraph:
                 ])
 
         return trajectory_per_task_dict
+
+    def _build_rollout_summary(self, rollout_tracking_dict, aggregated_results, completed_count, failed_count):
+        total_rollouts = len(rollout_tracking_dict)
+        total_hops = 0
+        rollouts_with_hops = 0
+        graph_error_count = 0
+        graph_error_type_counts = {}
+
+        for tracking_data in rollout_tracking_dict.values():
+            hop_count = len(tracking_data.get("hops", []))
+            total_hops += hop_count
+            if hop_count > 0:
+                rollouts_with_hops += 1
+
+            graph_error = tracking_data.get("graph_error")
+            if graph_error:
+                graph_error_count += 1
+                error_type = graph_error.get("error_type", "UnknownError")
+                graph_error_type_counts[error_type] = graph_error_type_counts.get(error_type, 0) + 1
+
+        rollouts_without_hops = total_rollouts - rollouts_with_hops
+        avg_hops_per_rollout = total_hops / total_rollouts if total_rollouts > 0 else 0.0
+        avg_hops_per_nonempty_rollout = total_hops / rollouts_with_hops if rollouts_with_hops > 0 else 0.0
+        policy_sample_counts = {
+            policy_name: self._dataproto_len(policy_data)
+            for policy_name, policy_data in aggregated_results.items()
+        }
+
+        return {
+            "total_rollouts": total_rollouts,
+            "completed_rollouts": completed_count,
+            "failed_rollouts": failed_count,
+            "rollouts_with_hops": rollouts_with_hops,
+            "rollouts_without_hops": rollouts_without_hops,
+            "total_hops": total_hops,
+            "avg_hops_per_rollout": avg_hops_per_rollout,
+            "avg_hops_per_nonempty_rollout": avg_hops_per_nonempty_rollout,
+            "graph_error_count": graph_error_count,
+            "graph_error_type_counts": graph_error_type_counts,
+            "policy_sample_counts": policy_sample_counts,
+        }
             
 
     async def generate_multiple_rollouts_concurrent(self, env_idx_list, rollout_mode="tree"):
@@ -755,5 +805,11 @@ class MultiAgentsExecutionEngineGraph:
 
         # Store rollout tracking dict for later access
         self.rollout_tracking_dict = rollout_tracking_dict
+        self.last_rollout_summary = self._build_rollout_summary(
+            rollout_tracking_dict=rollout_tracking_dict,
+            aggregated_results=aggregated_results,
+            completed_count=completed_count,
+            failed_count=failed_count,
+        )
 
         return aggregated_results

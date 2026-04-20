@@ -362,6 +362,71 @@ class MultiAgentsPPOTrainer:
             colorful_print(f"✓ [{idx}/{len(self.ppo_trainer_dict)}] Successfully initialized: {model_name}", "green")
         
         colorful_print(f"All {len(self.ppo_trainer_dict)} trainers initialized successfully!", "green")
+
+    def _policy_is_trainable(self, policy_name: str) -> bool:
+        policy_agents = self._get_policy_agents(policy_name)
+        if not policy_agents:
+            return True
+        return any(
+            self.agent_trainable.get(agent_name, True) and agent_name not in self.agent_untrained
+            for agent_name in policy_agents
+        )
+
+    def _dataproto_len(self, batch):
+        if batch is None or getattr(batch, "batch", None) is None:
+            return 0
+        try:
+            return len(batch)
+        except Exception:
+            return 0
+
+    def _collect_rollout_health_metrics(self, raw_rollouts_per_policy, batch_per_trainer):
+        metrics = {}
+        rollout_summary = getattr(self.agent_execution_engine, "last_rollout_summary", {}) or {}
+        if rollout_summary:
+            metrics.update(
+                {
+                    "rollout/total_rollouts": float(rollout_summary.get("total_rollouts", 0)),
+                    "rollout/completed_rollouts": float(rollout_summary.get("completed_rollouts", 0)),
+                    "rollout/failed_rollouts": float(rollout_summary.get("failed_rollouts", 0)),
+                    "rollout/rollouts_with_hops": float(rollout_summary.get("rollouts_with_hops", 0)),
+                    "rollout/rollouts_without_hops": float(rollout_summary.get("rollouts_without_hops", 0)),
+                    "rollout/total_hops": float(rollout_summary.get("total_hops", 0)),
+                    "rollout/avg_hops_per_rollout": float(rollout_summary.get("avg_hops_per_rollout", 0.0)),
+                    "rollout/avg_hops_per_nonempty_rollout": float(
+                        rollout_summary.get("avg_hops_per_nonempty_rollout", 0.0)
+                    ),
+                    "rollout/graph_error_count": float(rollout_summary.get("graph_error_count", 0)),
+                }
+            )
+            for error_type, count in rollout_summary.get("graph_error_type_counts", {}).items():
+                metrics[f"rollout/graph_error_type/{error_type}"] = float(count)
+            for policy_name, count in rollout_summary.get("policy_sample_counts", {}).items():
+                metrics[f"rollout/{policy_name}/raw_samples"] = float(count)
+
+        total_trainable_samples = 0
+        total_policies_with_ppo_metrics = 0
+        trainable_policy_count = 0
+        for policy_name, raw_batch in (raw_rollouts_per_policy or {}).items():
+            metrics[f"rollout/{policy_name}/raw_samples_post_engine"] = float(self._dataproto_len(raw_batch))
+
+        for policy_name, batch in (batch_per_trainer or {}).items():
+            sample_count = self._dataproto_len(batch)
+            has_ppo_metrics = 1.0 if self._batch_has_ppo_metrics(batch) else 0.0
+            is_trainable = 1.0 if self._policy_is_trainable(policy_name) else 0.0
+            metrics[f"train/{policy_name}/samples_after_filter"] = float(sample_count)
+            metrics[f"train/{policy_name}/has_ppo_metrics"] = has_ppo_metrics
+            metrics[f"train/{policy_name}/is_trainable"] = is_trainable
+            if is_trainable > 0:
+                trainable_policy_count += 1
+                total_trainable_samples += sample_count
+                total_policies_with_ppo_metrics += int(has_ppo_metrics > 0)
+
+        metrics["train/total_trainable_samples"] = float(total_trainable_samples)
+        metrics["train/trainable_policy_count"] = float(trainable_policy_count)
+        metrics["train/policies_with_ppo_metrics"] = float(total_policies_with_ppo_metrics)
+        metrics["train/no_trainable_samples"] = 1.0 if total_trainable_samples == 0 else 0.0
+        return metrics
         
     def _batch_has_samples(self, batch):
         if batch is None or getattr(batch, "batch", None) is None:
@@ -904,6 +969,21 @@ class MultiAgentsPPOTrainer:
                             all_trainer_metrics[f"overall/{metric_name}"] = float(np.mean(metric_values))
                     
                     metrics.update(all_trainer_metrics)
+                    rollout_health_metrics = self._collect_rollout_health_metrics(
+                        raw_rollouts_per_policy=gen_batch_output_per_policy,
+                        batch_per_trainer=batch_per_trainer,
+                    )
+                    metrics.update(rollout_health_metrics)
+                    if rollout_health_metrics.get("train/no_trainable_samples", 0.0) > 0:
+                        colorful_print(
+                            "No trainable samples were produced this step. Check rollout/* metrics and graph errors.",
+                            "red",
+                        )
+                    if rollout_health_metrics.get("rollout/graph_error_count", 0.0) > 0:
+                        colorful_print(
+                            f"Detected {int(rollout_health_metrics['rollout/graph_error_count'])} rollout graph errors this step.",
+                            "red",
+                        )
                     
                     # After step 1 training completes, enable LoRA for future generations
                     # Note: LoRA weights are automatically synced to vLLM during update_actor()

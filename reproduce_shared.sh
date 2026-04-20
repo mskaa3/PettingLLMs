@@ -72,6 +72,10 @@ fi
 export HOST_REPO_DIR
 echo "Using HOST_REPO_DIR=$HOST_REPO_DIR"
 ls -lah "$HOST_REPO_DIR"
+export TREE_RECORD_SHARED_DIR_HOST="${TREE_RECORD_SHARED_DIR_HOST:-$HOST_REPO_DIR/logs/tree_records}"
+export TREE_RECORD_SHARED_DIR_CONTAINER="${TREE_RECORD_SHARED_DIR_CONTAINER:-/workspace/PettingLLMs/logs/tree_records}"
+mkdir -p "$TREE_RECORD_SHARED_DIR_HOST"
+echo "Tree records will be mirrored to $TREE_RECORD_SHARED_DIR_HOST"
 
 ###############################################################################
 # Scratch layout
@@ -135,6 +139,7 @@ export APPTAINERENV_WANDB_DIR="/tmp/tmpdir/wandb"
 export APPTAINERENV_WANDB_CACHE_DIR="/tmp/tmpdir/wandb/.cache"
 export APPTAINERENV_WANDB_CONFIG_DIR="/tmp/tmpdir/wandb/.config"
 export APPTAINERENV_OUTPUT_DIR="/tmp/tmpdir/output"
+export APPTAINERENV_TREE_RECORD_SHARED_DIR="${TREE_RECORD_SHARED_DIR_CONTAINER}"
 export APPTAINERENV_CHECKPOINT_DIR="${CHECKPOINT_DIR}"
 
 export APPTAINERENV_TRITON_CACHE_DIR="/tmp/tmpdir/triton"
@@ -278,6 +283,9 @@ srun --overlap --nodes=1 --ntasks=1 -w "$head_node" apptainer exec --nv \
   "$LOCAL_SIF" \
   bash -c "$COMMAND"
 
+echo "Tree record files under shared mirror ($TREE_RECORD_SHARED_DIR_HOST):"
+find "$TREE_RECORD_SHARED_DIR_HOST" -maxdepth 1 -type f \( -name "decomposition_output_*_job${SLURM_JOB_ID}.jsonl" -o -name "decomposition_trace_*_job${SLURM_JOB_ID}.jsonl" \) -print 2>/dev/null || true
+
 ###############################################################################
 # Collect outputs
 ###############################################################################
@@ -307,6 +315,13 @@ upload_dir() {
 
 if [[ "${UPLOAD_OUTPUTS}" == "1" ]]; then
   upload_dir "$RUN_ROOT/output" "${REMOTE_JOB_DIR}/" "outputs" || true
+fi
+
+TREE_RECORD_UPLOAD_STAGE="$RUN_ROOT/tree_records_upload"
+mkdir -p "$TREE_RECORD_UPLOAD_STAGE"
+find "$TREE_RECORD_SHARED_DIR_HOST" -maxdepth 1 -type f \( -name "decomposition_output_*_job${SLURM_JOB_ID}.jsonl" -o -name "decomposition_trace_*_job${SLURM_JOB_ID}.jsonl" \) -exec cp {} "$TREE_RECORD_UPLOAD_STAGE"/ \; 2>/dev/null || true
+if compgen -G "$TREE_RECORD_UPLOAD_STAGE/*.jsonl" > /dev/null; then
+  upload_dir "$TREE_RECORD_UPLOAD_STAGE" "${REMOTE_JOB_DIR}/tree_records/" "tree records" || true
 fi
 
 if [[ "${UPLOAD_CHECKPOINTS}" == "1" ]]; then

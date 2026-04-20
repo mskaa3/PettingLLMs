@@ -15,6 +15,7 @@ from pettingllms.utils.openai import get_hop_idx, get_rollout_idx
 
 
 _TREE_RECORD_WRITE_LOCK = threading.Lock()
+_TREE_RECORD_ANNOUNCED_PATHS = set()
 
 
 def extract_answer(text: str) -> str:
@@ -526,23 +527,74 @@ def _memory_summary(memory_snapshot: Dict[str, Any], worker_agents: List[Dict[st
     return "\n".join(lines) if lines else "No performance history is available yet."
 
 
-def _resolve_tree_record_path(env: MathEnv) -> str:
+def _tree_record_file_name(env: MathEnv, prefix: str) -> str:
     training_cfg = getattr(env.config, "training", None)
     experiment_name = _config_value(training_cfg, "experiment_name", "experiment")
     date_str = datetime.now().strftime("%Y%m%d")
+    job_id = os.environ.get("SLURM_JOB_ID") or os.environ.get("JOB_ID")
+    job_suffix = f"_job{_safe_filename_fragment(job_id)}" if job_id else ""
+    return f"{prefix}_{_safe_filename_fragment(experiment_name)}_{date_str}{job_suffix}.jsonl"
+
+
+def _resolve_tree_record_path(env: MathEnv, prefix: str = "decomposition_output") -> str:
     output_dir = os.environ.get("OUTPUT_DIR") or os.environ.get("APPTAINERENV_OUTPUT_DIR")
     if not output_dir:
         output_dir = "/tmp/tmpdir/output" if os.path.isdir("/tmp/tmpdir") else os.path.abspath("output")
     os.makedirs(output_dir, exist_ok=True)
-    file_name = f"decomposition_output_{_safe_filename_fragment(experiment_name)}_{date_str}.jsonl"
+    file_name = _tree_record_file_name(env, prefix)
     return os.path.join(output_dir, file_name)
 
 
-def _append_tree_record(env: MathEnv, record: Dict[str, Any]) -> None:
-    output_path = _resolve_tree_record_path(env)
+def _json_safe(value: Any):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return _json_safe(value.tolist())
+        except Exception:
+            pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _resolve_tree_record_paths(env: MathEnv, prefix: str = "decomposition_output") -> List[str]:
+    primary_path = _resolve_tree_record_path(env, prefix=prefix)
+    paths = [primary_path]
+
+    shared_dir = os.environ.get("TREE_RECORD_SHARED_DIR") or os.environ.get("APPTAINERENV_TREE_RECORD_SHARED_DIR")
+    if shared_dir:
+        os.makedirs(shared_dir, exist_ok=True)
+        shared_path = os.path.join(shared_dir, _tree_record_file_name(env, prefix))
+        if os.path.abspath(shared_path) not in {os.path.abspath(path) for path in paths}:
+            paths.append(shared_path)
+
+    return paths
+
+
+def _append_tree_record(
+    env: MathEnv,
+    record: Dict[str, Any],
+    prefix: str = "decomposition_output",
+) -> List[str]:
+    output_paths = _resolve_tree_record_paths(env, prefix=prefix)
+    safe_record = _json_safe(record)
     with _TREE_RECORD_WRITE_LOCK:
-        with open(output_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        for output_path in output_paths:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(safe_record, ensure_ascii=True) + "\n")
+            if output_path not in _TREE_RECORD_ANNOUNCED_PATHS:
+                print(f"[decomposer_selector_graph] Writing tree records to {output_path}")
+                _TREE_RECORD_ANNOUNCED_PATHS.add(output_path)
+    return output_paths
 
 
 def _serialize_prior_decomposition_candidates(prior_candidates: List[Dict[str, Any]]) -> str:
@@ -1212,6 +1264,34 @@ async def math_decomposer_selector_graph(
             )
             agent_events.extend(branch_result["agent_events"])
             selector_events.extend(branch_result["selector_events"])
+            selection_trace_record = {
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "record_type": "selection_result",
+                "experiment_name": _config_value(getattr(env.config, "training", None), "experiment_name", "experiment"),
+                "rollout_tree_id": tree_group_id,
+                "task_prompt": task,
+                "ground_truth_answer": ground_truth_answer,
+                "decomposition_id": decomposition_id,
+                "selection_id": selection_id,
+                "decomposer_hop": decomposer_hop,
+                "selector_hop": branch_result["selector_hop"],
+                "decomposition": decomposition,
+                "assignment_plan": branch_result["assignment_plan"],
+                "worker_executions": branch_result.get("worker_executions", []),
+                "execution_trace": branch_result["execution_trace"],
+                "partial_rewards": branch_result["partial_rewards"],
+                "selector_reward": branch_result["selector_reward"],
+                "final_answer_candidate": branch_result["final_answer_candidate"],
+                "final_reward": branch_result["final_reward"],
+            }
+            try:
+                env.state.tree_trace_paths = _append_tree_record(
+                    env,
+                    selection_trace_record,
+                    prefix="decomposition_trace",
+                )
+            except Exception as exc:
+                print(f"[decomposer_selector_graph] Failed to append selection trace record: {exc}")
 
         avg_selector_reward = sum(
             candidate["selector_reward"] for candidate in selector_candidate_results
@@ -1245,6 +1325,41 @@ async def math_decomposer_selector_graph(
                 "selector_candidates": selector_candidate_results,
             }
         )
+        decomposition_trace_record = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "record_type": "decomposition_result",
+            "experiment_name": _config_value(getattr(env.config, "training", None), "experiment_name", "experiment"),
+            "rollout_tree_id": tree_group_id,
+            "task_prompt": task,
+            "ground_truth_answer": ground_truth_answer,
+            "decomposition_id": decomposition_id,
+            "decomposer_hop": decomposer_hop,
+            "decomposer_prompt": decomposer_prompt,
+            "decomposer_raw_output": decomposer_output,
+            "decomposition": decomposition,
+            "heuristic_decomposition_reward": heuristic_decomposition_reward,
+            "avg_selector_reward": avg_selector_reward,
+            "decomposer_reward": decomposer_reward,
+            "selector_candidates": [
+                {
+                    "selection_id": branch["selection_id"],
+                    "selector_hop": branch["selector_hop"],
+                    "assignment_plan": branch["assignment_plan"],
+                    "selector_reward": branch["selector_reward"],
+                    "final_answer_candidate": branch["final_answer_candidate"],
+                    "final_reward": branch["final_reward"],
+                }
+                for branch in selector_candidate_results
+            ],
+        }
+        try:
+            env.state.tree_trace_paths = _append_tree_record(
+                env,
+                decomposition_trace_record,
+                prefix="decomposition_trace",
+            )
+        except Exception as exc:
+            print(f"[decomposer_selector_graph] Failed to append decomposition trace record: {exc}")
         decomposer_events.append(
             {
                 "reward": decomposer_reward,
@@ -1256,6 +1371,25 @@ async def math_decomposer_selector_graph(
     if not all_branch_results:
         env.state.final_reward = 0.0
         env.final_reward = 0.0
+        empty_tree_record = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "record_type": "empty_tree",
+            "experiment_name": _config_value(getattr(env.config, "training", None), "experiment_name", "experiment"),
+            "rollout_tree_id": tree_group_id,
+            "task_prompt": task,
+            "ground_truth_answer": ground_truth_answer,
+            "num_decompositions": num_decompositions,
+            "num_selections_per_decomposition": num_selections_per_decomposition,
+            "reason": "no_branch_results",
+        }
+        try:
+            env.state.tree_trace_paths = _append_tree_record(
+                env,
+                empty_tree_record,
+                prefix="decomposition_trace",
+            )
+        except Exception as exc:
+            print(f"[decomposer_selector_graph] Failed to append empty-tree trace record: {exc}")
         return env
 
     best_branch = max(all_branch_results, key=_branch_sort_key)
@@ -1364,7 +1498,19 @@ async def math_decomposer_selector_graph(
         ],
     }
     try:
-        _append_tree_record(env, tree_record)
+        env.state.tree_record_paths = _append_tree_record(env, tree_record)
     except Exception as exc:
         print(f"[decomposer_selector_graph] Failed to append decomposition tree record: {exc}")
+    final_tree_trace_record = {
+        **tree_record,
+        "record_type": "final_tree",
+    }
+    try:
+        env.state.tree_trace_paths = _append_tree_record(
+            env,
+            final_tree_trace_record,
+            prefix="decomposition_trace",
+        )
+    except Exception as exc:
+        print(f"[decomposer_selector_graph] Failed to append final tree trace record: {exc}")
     return env

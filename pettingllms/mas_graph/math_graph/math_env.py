@@ -33,6 +33,8 @@ class MathEnvState:
     subtask_execution_trace: List[Dict[str, Any]] = field(default_factory=list)
     best_branch_summary: Dict[str, Any] = field(default_factory=dict)
     partial_rewards: Dict[str, float] = field(default_factory=dict)
+    tree_record_paths: List[str] = field(default_factory=list)
+    tree_trace_paths: List[str] = field(default_factory=list)
     hop_reward_overrides: Dict[int, float] = field(default_factory=dict)
     hop_metadata: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     performance_memory_snapshot: Dict[str, Any] = field(default_factory=dict)
@@ -86,6 +88,8 @@ class MathEnv(Env):
         self.state.subtask_execution_trace = []
         self.state.best_branch_summary = {}
         self.state.partial_rewards = {}
+        self.state.tree_record_paths = []
+        self.state.tree_trace_paths = []
         self.state.hop_reward_overrides = {}
         self.state.hop_metadata = {}
         self.state.performance_memory_snapshot = {}
