@@ -67,20 +67,25 @@ class MultiLoggerConfig:
     Multi-logger system configuration, supports creating different types of loggers
     """
     
-    def __init__(self, log_dir: str = "logs", experiment_name: str = "default"):
+    def __init__(self, log_dir: str = "logs", experiment_name: str = "default", enable_file_logging: Optional[bool] = None):
         """
         Initialize multi-logger configuration
         
         Args:
             log_dir: Log file storage directory
         """
-        # Create directory structure with date only
+        if enable_file_logging is None:
+            enable_file_logging = os.environ.get("PETTINGLLMS_ENABLE_FILE_LOGS", "0").lower() in {"1", "true", "yes", "on"}
+        self.enable_file_logging = bool(enable_file_logging)
+
+        # Create directory structure with date only when file logging is enabled
         current_time = datetime.now()
         date_folder = current_time.strftime("%m-%d")
         timestamp_folder = current_time.strftime("%H-%M-%S")
         
         self.log_dir = Path(log_dir) / experiment_name / date_folder / timestamp_folder
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        if self.enable_file_logging:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # Logger dictionary
         self.loggers: Dict[str, logging.Logger] = {}
@@ -132,6 +137,11 @@ class MultiLoggerConfig:
         logger.handlers.clear()
         logger.propagate = False
 
+        if not self.enable_file_logging:
+            logger.addHandler(logging.NullHandler())
+            self.loggers[logger_key] = logger
+            return logger
+
         # Create hierarchical directory structure: env_idx/rollout_idx/
         env_dir = self.log_dir / str(mode) / str(env_idx)
         rollout_dir = env_dir / str(rollout_idx)
@@ -176,26 +186,29 @@ class MultiLoggerConfig:
         # Clear existing handlers
         logger.handlers.clear()
         
-        # Create file handler with immediate flush
-        file_handler = logging.FileHandler(
-            self.log_dir / "summary.log", 
-            mode='a', 
-            encoding='utf-8'
-        )
-        file_handler.setLevel(logging.INFO)
-        # Enable immediate flush for time-ordered logging
-        import sys
-        if hasattr(file_handler.stream, 'reconfigure'):
-            file_handler.stream.reconfigure(line_buffering=True)
+        if self.enable_file_logging:
+            # Create file handler with immediate flush
+            file_handler = logging.FileHandler(
+                self.log_dir / "summary.log", 
+                mode='a', 
+                encoding='utf-8'
+            )
+            file_handler.setLevel(logging.INFO)
+            # Enable immediate flush for time-ordered logging
+            import sys
+            if hasattr(file_handler.stream, 'reconfigure'):
+                file_handler.stream.reconfigure(line_buffering=True)
+            
+            # Set format
+            formatter = logging.Formatter(
+                '[%(asctime)s] [ROLLOUT:%(rollout_idx)s] %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        else:
+            logger.addHandler(logging.NullHandler())
         
-        # Set format
-        formatter = logging.Formatter(
-            '[%(asctime)s] [ROLLOUT:%(rollout_idx)s] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(formatter)
-        
-        logger.addHandler(file_handler)
         logger.propagate = False
         self.loggers[logger_name] = logger
     

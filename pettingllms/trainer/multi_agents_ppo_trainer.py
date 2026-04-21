@@ -932,11 +932,6 @@ class MultiAgentsPPOTrainer:
         from datetime import datetime
         import os
         
-        # Generate log path: logs/experiment_name/date/time
-        current_time = datetime.now()
-        date_str = current_time.strftime("%m-%d")
-        time_str = current_time.strftime("%H-%M-%S")
-        
         experiment_name = self.config.training.experiment_name
         training_entity = OmegaConf.select(self.config, "training.entity", default=None)
         if training_entity in (None, ""):
@@ -946,8 +941,15 @@ class MultiAgentsPPOTrainer:
             requested_backends = [requested_backends]
         else:
             requested_backends = list(requested_backends)
-        log_dir = os.path.join("logs", experiment_name, date_str, time_str)
-        os.makedirs(log_dir, exist_ok=True)
+        file_logging_enabled = os.environ.get("PETTINGLLMS_ENABLE_FILE_LOGS", "0").lower() in {"1", "true", "yes", "on"}
+        log_dir = None
+        if file_logging_enabled:
+            # Generate log path only when file logging is enabled
+            current_time = datetime.now()
+            date_str = current_time.strftime("%m-%d")
+            time_str = current_time.strftime("%H-%M-%S")
+            log_dir = os.path.join("logs", experiment_name, date_str, time_str)
+            os.makedirs(log_dir, exist_ok=True)
 
         tracking_config = OmegaConf.to_container(self.config, resolve=True)
         try:
@@ -977,7 +979,10 @@ class MultiAgentsPPOTrainer:
             else:
                 raise
         
-        colorful_print(f"Logger initialized with log_dir: {log_dir}", "cyan")
+        if log_dir is not None:
+            colorful_print(f"Logger initialized with log_dir: {log_dir}", "cyan")
+        else:
+            colorful_print("Logger initialized with file logging disabled", "cyan")
         return logger
 
     def fit(self):
