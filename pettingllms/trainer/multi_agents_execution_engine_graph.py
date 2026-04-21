@@ -174,6 +174,45 @@ class MultiAgentsExecutionEngineGraph:
         except Exception:
             return 0
 
+    def _fill_missing_non_tensor_keys(self, data_proto, target_keys):
+        if data_proto is None:
+            return data_proto
+
+        row_count = self._dataproto_len(data_proto)
+        if data_proto.non_tensor_batch is None:
+            data_proto.non_tensor_batch = {}
+
+        for key in target_keys:
+            if key not in data_proto.non_tensor_batch:
+                data_proto.non_tensor_batch[key] = np.full((row_count,), None, dtype=object)
+
+        return data_proto
+
+    def _concat_dataprotos_safe(self, left, right, context=""):
+        left_len = self._dataproto_len(left)
+        right_len = self._dataproto_len(right)
+
+        if left_len == 0:
+            return right
+        if right_len == 0:
+            return left
+
+        left_keys = set((left.non_tensor_batch or {}).keys())
+        right_keys = set((right.non_tensor_batch or {}).keys())
+        target_keys = left_keys | right_keys
+
+        self._fill_missing_non_tensor_keys(left, target_keys)
+        self._fill_missing_non_tensor_keys(right, target_keys)
+
+        try:
+            return DataProto.concat([left, right])
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to concatenate DataProto objects in {context}. "
+                f"left_len={left_len}, right_len={right_len}, "
+                f"left_keys={sorted(left_keys)}, right_keys={sorted(right_keys)}"
+            ) from exc
+
     def _append_recent_event(self, event):
         recent_events = self.performance_memory.setdefault("recent_events", [])
         recent_events.append(event)
@@ -588,10 +627,11 @@ class MultiAgentsExecutionEngineGraph:
             if trajectory_per_task_dict[policy_name].batch is None:
                 trajectory_per_task_dict[policy_name] = output_dpr
             else:
-                trajectory_per_task_dict[policy_name] = DataProto.concat([
-                    trajectory_per_task_dict[policy_name], 
-                    output_dpr
-                ])
+                trajectory_per_task_dict[policy_name] = self._concat_dataprotos_safe(
+                    trajectory_per_task_dict[policy_name],
+                    output_dpr,
+                    context=f"generate_single_rollout:{policy_name}:rollout_{rollout_idx}",
+                )
 
         return trajectory_per_task_dict
 
@@ -732,10 +772,11 @@ class MultiAgentsExecutionEngineGraph:
                             if aggregated_results[policy_name].batch is None:
                                 aggregated_results[policy_name] = policy_data
                             else:
-                                aggregated_results[policy_name] = DataProto.concat([
-                                    aggregated_results[policy_name], 
-                                    policy_data
-                                ])
+                                aggregated_results[policy_name] = self._concat_dataprotos_safe(
+                                    aggregated_results[policy_name],
+                                    policy_data,
+                                    context=f"generate_multiple_rollouts_concurrent:{policy_name}",
+                                )
                     
                     completed_count += 1
                     task_pbar.update(1)
@@ -745,6 +786,8 @@ class MultiAgentsExecutionEngineGraph:
                     failed_count += 1
                     task_pbar.update(1)
                     task_pbar.set_description(f"Rollouts ({completed_count}/{len(tasks)}, {failed_count} failed)")
+                    print(f"[ConcurrentRollouts] Task failed: {type(e).__name__}: {e}")
+                    print(traceback.format_exc())
                     
                     self.multi_logger.log_async_event(
                         self.mode, -1, -1, "task_error",
