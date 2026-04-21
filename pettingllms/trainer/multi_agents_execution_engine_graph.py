@@ -29,7 +29,8 @@ from pettingllms.utils.openai import (
     init_patch_context,
     patch_all,
     wrap_autogen_graph,
-    get_trajectory_store
+    get_trajectory_store,
+    start_flow_context,
 )
 from pettingllms.trainer.core_algo import calculate_reward
 
@@ -316,10 +317,16 @@ class MultiAgentsExecutionEngineGraph:
         print("ROLLOUT TRACKING SUMMARY")
         print("="*80)
 
+        include_empty_rollouts = bool(getattr(self.config.training, "rollout_summary_include_empty", False))
+        skipped_empty_rollouts = 0
+
         for rollout_idx, tracking_data in sorted(rollout_tracking_dict.items()):
             env_idx = tracking_data['env_idx']
             hops = tracking_data['hops']
             graph_error = tracking_data.get('graph_error')
+            if not include_empty_rollouts and len(hops) == 0 and not graph_error:
+                skipped_empty_rollouts += 1
+                continue
 
             print(f"\nRollout {rollout_idx} (Env {env_idx}):")
             print(f"  Total hops: {len(hops)}")
@@ -338,6 +345,9 @@ class MultiAgentsExecutionEngineGraph:
                 print(f"      Policy: {policy_name}")
                 print(f"      DataProto UUID: {dataproto_uuid}")
                 print(f"      Response preview: {response_preview}...")
+
+        if skipped_empty_rollouts:
+            print(f"\nSkipped {skipped_empty_rollouts} empty rollouts in the printed summary.")
 
         # Log to multi_logger for structured logging
         self.multi_logger.log_async_event(
@@ -455,6 +465,7 @@ class MultiAgentsExecutionEngineGraph:
         trajectory_per_task_dict = {p: DataProto() for p in self.tokenizer_dict.keys()}
         env_idx = rollout_idx // self.sample_num
         env = self.envs[rollout_idx]
+        start_flow_context(rollout_idx=rollout_idx, env_idx=env_idx)
 
         # Initialize tracking for this rollout
         if rollout_idx not in rollout_tracking_dict:

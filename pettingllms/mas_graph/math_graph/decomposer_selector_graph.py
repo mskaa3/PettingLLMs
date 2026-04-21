@@ -88,6 +88,28 @@ def _clip(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, float(value)))
 
 
+def _coerce_confidence_value(value: Any, default: float = 0.5) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return _clip(float(value))
+
+    normalized = str(value).strip().lower()
+    if normalized in {"low", "small", "weak"}:
+        return 0.25
+    if normalized in {"medium", "moderate", "mid"}:
+        return 0.5
+    if normalized in {"high", "strong"}:
+        return 0.85
+    if normalized in {"very_high", "very high"}:
+        return 0.95
+
+    try:
+        return _clip(float(normalized))
+    except (TypeError, ValueError):
+        return default
+
+
 def _extract_json_candidate(text: str) -> Optional[str]:
     if not text:
         return None
@@ -789,7 +811,7 @@ def _parse_worker_output(raw_output: str) -> Dict[str, Any]:
             "status": str(payload.get("status") or "completed").strip(),
             "result": result or raw_output.strip(),
             "answer_candidate": answer_candidate,
-            "confidence": float(payload.get("confidence", 0.5) or 0.5),
+            "confidence": _coerce_confidence_value(payload.get("confidence", 0.5), default=0.5),
             "raw_output": raw_output,
         }
     return {
