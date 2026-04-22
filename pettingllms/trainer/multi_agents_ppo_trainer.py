@@ -428,6 +428,24 @@ class MultiAgentsPPOTrainer:
         metrics["train/no_trainable_samples"] = 1.0 if total_trainable_samples == 0 else 0.0
         return metrics
 
+    def _filter_logged_metrics(self, metrics):
+        allowed_prefixes = (
+            "roles/",
+            "rollout/",
+            "train/",
+            "validation/",
+        )
+        allowed_exact = {
+            "training/global_step",
+        }
+
+        filtered_metrics = {}
+        for key, value in metrics.items():
+            if key in allowed_exact or key.startswith(allowed_prefixes):
+                filtered_metrics[key] = value
+
+        return filtered_metrics
+
     def _select_batch_by_role(self, batch, role_name: str):
         if not self._batch_has_samples(batch):
             return None
@@ -514,7 +532,72 @@ class MultiAgentsPPOTrainer:
             return f"generation/prompt_length/{suffix}"
         return metric_name
 
-    def _compute_role_metrics(self, batch, policy_name: str, use_critic: bool):
+    def _compute_role_actor_diagnostics(self, role_batch, ppo_trainer):
+        if role_batch is None or not self._batch_has_ppo_metrics(role_batch):
+            return None
+
+        required_batch_keys = {
+            "responses",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+            "response_mask",
+        }
+        if not required_batch_keys.issubset(set(role_batch.batch.keys())):
+            return None
+
+        non_tensor_select_keys = None
+        if "multi_modal_inputs" in role_batch.non_tensor_batch:
+            non_tensor_select_keys = ["multi_modal_inputs"]
+
+        diagnostic_batch = role_batch.select(
+            batch_keys=["responses", "input_ids", "attention_mask", "position_ids"],
+            non_tensor_batch_keys=non_tensor_select_keys,
+        )
+        current_policy_output = ppo_trainer.actor_rollout_wg.compute_log_prob(diagnostic_batch)
+
+        current_log_prob = current_policy_output.batch["old_log_probs"]
+        entropys = current_policy_output.batch["entropys"]
+        old_log_prob = role_batch.batch["old_log_probs"]
+        advantages = role_batch.batch["advantages"]
+        response_mask = role_batch.batch["response_mask"]
+
+        actor_cfg = ppo_trainer.config.actor_rollout_ref.actor
+        clip_ratio = actor_cfg.clip_ratio
+        clip_ratio_low = actor_cfg.clip_ratio_low if actor_cfg.clip_ratio_low is not None else clip_ratio
+        clip_ratio_high = actor_cfg.clip_ratio_high if actor_cfg.clip_ratio_high is not None else clip_ratio
+        clip_ratio_c = actor_cfg.get("clip_ratio_c", 3.0)
+        loss_agg_mode = actor_cfg.loss_agg_mode
+        entropy_coeff = actor_cfg.entropy_coeff
+
+        pg_loss, _, ppo_kl, _ = core_algos.compute_policy_loss(
+            old_log_prob=old_log_prob,
+            log_prob=current_log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            cliprange=clip_ratio,
+            cliprange_low=clip_ratio_low,
+            cliprange_high=clip_ratio_high,
+            clip_ratio_c=clip_ratio_c,
+            loss_agg_mode=loss_agg_mode,
+        )
+
+        loss_agg_mode_entropy = "token-mean" if entropy_coeff == 0 else loss_agg_mode
+        entropy_loss = core_algos.agg_loss(
+            loss_mat=entropys,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode_entropy,
+        )
+
+        return {
+            "actor/pg_loss": float(pg_loss.detach().item()),
+            "actor/ppo_kl": float(ppo_kl.detach().item()),
+            "actor/entropy_loss": float(entropy_loss.detach().item()),
+        }
+
+    def _compute_role_metrics(self, batch, policy_name: str, use_critic: bool, ppo_trainer=None):
         metrics = {}
         aggregate_buckets = defaultdict(list)
         if not self._batch_has_samples(batch):
@@ -545,11 +628,9 @@ class MultiAgentsPPOTrainer:
             if role_batch is None or not self._batch_has_samples(role_batch):
                 continue
 
-            role_prefix = f"role/{policy_name}/{role_name}"
             role_aggregate_prefix = f"roles/{role_name}"
 
             role_sample_count = float(len(role_batch))
-            metrics[f"{role_prefix}/samples/count"] = role_sample_count
             aggregate_buckets[f"{role_aggregate_prefix}/samples/count"].append(role_sample_count)
 
             grpo_uids = role_batch.non_tensor_batch.get("grpo_uid")
@@ -561,9 +642,6 @@ class MultiAgentsPPOTrainer:
                 group_count = float(len(unique_uids))
                 avg_group_size = float(np.mean(uid_counts)) if len(uid_counts) > 0 else 0.0
                 max_group_size = float(np.max(uid_counts)) if len(uid_counts) > 0 else 0.0
-                metrics[f"{role_prefix}/grpo/group_count"] = group_count
-                metrics[f"{role_prefix}/grpo/group_size_mean"] = avg_group_size
-                metrics[f"{role_prefix}/grpo/group_size_max"] = max_group_size
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/group_count"].append(group_count)
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/group_size_mean"].append(avg_group_size)
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/group_size_max"].append(max_group_size)
@@ -572,8 +650,6 @@ class MultiAgentsPPOTrainer:
             if reward_values is not None:
                 reward_mean = float(np.mean(reward_values))
                 reward_std = float(np.std(reward_values)) if reward_values.size > 1 else 0.0
-                metrics[f"{role_prefix}/training_reward/mean"] = reward_mean
-                metrics[f"{role_prefix}/training_reward/std"] = reward_std
                 aggregate_buckets[f"{role_aggregate_prefix}/training_reward/mean"].append(reward_mean)
                 aggregate_buckets[f"{role_aggregate_prefix}/training_reward/std"].append(reward_std)
 
@@ -584,8 +660,6 @@ class MultiAgentsPPOTrainer:
                 mean_value = float(np.mean(numeric_values))
                 std_value = float(np.std(numeric_values)) if numeric_values.size > 1 else 0.0
                 alias = self._role_metadata_alias(meta_key)
-                metrics[f"{role_prefix}/{alias}/mean"] = mean_value
-                metrics[f"{role_prefix}/{alias}/std"] = std_value
                 aggregate_buckets[f"{role_aggregate_prefix}/{alias}/mean"].append(mean_value)
                 aggregate_buckets[f"{role_aggregate_prefix}/{alias}/std"].append(std_value)
 
@@ -596,7 +670,6 @@ class MultiAgentsPPOTrainer:
                     if scalar_metric_value is None:
                         continue
                     renamed_metric = self._rename_role_data_metric(metric_name)
-                    metrics[f"{role_prefix}/{renamed_metric}"] = scalar_metric_value
                     if isinstance(scalar_metric_value, (int, float)):
                         aggregate_buckets[f"{role_aggregate_prefix}/{renamed_metric}"].append(float(scalar_metric_value))
 
@@ -610,14 +683,23 @@ class MultiAgentsPPOTrainer:
                 adv_std = float(seq_advantages.float().std(unbiased=False).detach().item()) if seq_advantages.numel() > 1 else 0.0
                 ret_std = float(seq_returns.float().std(unbiased=False).detach().item()) if seq_returns.numel() > 1 else 0.0
 
-                metrics[f"{role_prefix}/grpo/advantage_nonzero_fraction"] = adv_nonzero_fraction
-                metrics[f"{role_prefix}/grpo/advantage_sequence_std"] = adv_std
-                metrics[f"{role_prefix}/grpo/return_nonzero_fraction"] = ret_nonzero_fraction
-                metrics[f"{role_prefix}/grpo/return_sequence_std"] = ret_std
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/advantage_nonzero_fraction"].append(adv_nonzero_fraction)
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/advantage_sequence_std"].append(adv_std)
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/return_nonzero_fraction"].append(ret_nonzero_fraction)
                 aggregate_buckets[f"{role_aggregate_prefix}/grpo/return_sequence_std"].append(ret_std)
+
+                if ppo_trainer is not None:
+                    actor_diagnostics = self._compute_role_actor_diagnostics(role_batch, ppo_trainer)
+                    if actor_diagnostics is not None:
+                        for metric_name, metric_value in actor_diagnostics.items():
+                            aggregate_buckets[f"{role_aggregate_prefix}/{metric_name}"].append(float(metric_value))
+
+                shared_actor_grad_norm = None
+                batch_metrics = getattr(batch, "meta_info", {}).get("metrics", {}) if hasattr(batch, "meta_info") else {}
+                if isinstance(batch_metrics, dict):
+                    shared_actor_grad_norm = self._scalarize_metric_value(batch_metrics.get("actor/grad_norm"))
+                if isinstance(shared_actor_grad_norm, (int, float)):
+                    aggregate_buckets[f"{role_aggregate_prefix}/actor/shared_grad_norm"].append(float(shared_actor_grad_norm))
 
         return metrics, aggregate_buckets
         
@@ -1222,6 +1304,7 @@ class MultiAgentsPPOTrainer:
                     batch=batch,
                     policy_name=model_name,
                     use_critic=use_critic_for_metrics,
+                    ppo_trainer=self.ppo_trainer_dict.get(model_name),
                 )
                 metrics.update(role_metrics)
                 for metric_name, metric_values in role_metric_buckets.items():
@@ -1257,11 +1340,12 @@ class MultiAgentsPPOTrainer:
             self.global_steps += 1
             for ppo_trainer in self.ppo_trainer_dict.values():
                 ppo_trainer.global_steps = self.global_steps
+            logged_metrics = self._filter_logged_metrics(metrics)
             try:
-                logger.log(data=metrics, step=self.global_steps)
+                logger.log(data=logged_metrics, step=self.global_steps)
             except Exception as e:
                 pprint(f"Warning: Failed to log metrics to logger: {type(e).__name__}: {e}")
-                pprint(f"Metrics that failed to log: {list(metrics.keys())}")
+                pprint(f"Metrics that failed to log: {list(logged_metrics.keys())}")
 
             # Clean up old image folders if multimodal is enabled
             enable_multimodal = getattr(self.config.training, 'enable_multimodal', False)
