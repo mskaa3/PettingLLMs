@@ -26,9 +26,12 @@ orchestration:
   num_decompositions: 3
   num_selections_per_decomposition: 3
   max_subtasks: 4
+  absolute_max_subtasks: 6
   require_final_synthesis_subtask: true
-  decomposer_heuristic_reward_weight: 0.45
-  decomposer_selector_reward_weight: 0.55
+  decomposer_heuristic_reward_weight: 0.30
+  decomposer_selector_reward_weight: 0.70
+  decomposer_budget_penalty_lambda: 0.20
+  decomposer_overflow_reward_cap: 0.10
   selector_final_reward_weight: 0.40
   selector_partial_reward_weight: 0.35
   selector_compatibility_weight: 0.25

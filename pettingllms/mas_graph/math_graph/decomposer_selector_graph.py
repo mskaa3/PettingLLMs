@@ -434,6 +434,7 @@ def _validate_decomposition(
     task: str,
     worker_agents: List[Dict[str, Any]],
     max_subtasks: int,
+    absolute_max_subtasks: int,
     require_final_synthesis_subtask: bool,
 ) -> Dict[str, Any]:
     worker_capabilities = sorted(
@@ -445,11 +446,23 @@ def _validate_decomposition(
     )
 
     if not isinstance(decomposition, dict) or not isinstance(decomposition.get("subtasks"), list):
-        return _fallback_decomposition(task, worker_capabilities, require_final_synthesis_subtask)
+        fallback = _fallback_decomposition(task, worker_capabilities, require_final_synthesis_subtask)
+        fallback["proposed_num_subtasks_raw"] = 0
+        fallback["overflow_rejected"] = False
+        return fallback
+
+    raw_subtasks = decomposition.get("subtasks", [])
+    proposed_num_subtasks_raw = len(raw_subtasks)
+    overflow_rejected = proposed_num_subtasks_raw > absolute_max_subtasks
+    if overflow_rejected:
+        fallback = _fallback_decomposition(task, worker_capabilities, require_final_synthesis_subtask)
+        fallback["proposed_num_subtasks_raw"] = proposed_num_subtasks_raw
+        fallback["overflow_rejected"] = True
+        return fallback
 
     sanitized_subtasks: List[Dict[str, Any]] = []
     seen_ids = set()
-    for index, raw_subtask in enumerate(decomposition.get("subtasks", [])[:max_subtasks], start=1):
+    for index, raw_subtask in enumerate(raw_subtasks, start=1):
         if not isinstance(raw_subtask, dict):
             continue
         subtask_id = str(raw_subtask.get("id") or f"s{index}").strip() or f"s{index}"
@@ -479,7 +492,10 @@ def _validate_decomposition(
         )
 
     if not sanitized_subtasks:
-        return _fallback_decomposition(task, worker_capabilities, require_final_synthesis_subtask)
+        fallback = _fallback_decomposition(task, worker_capabilities, require_final_synthesis_subtask)
+        fallback["proposed_num_subtasks_raw"] = proposed_num_subtasks_raw
+        fallback["overflow_rejected"] = False
+        return fallback
 
     valid_ids = {subtask["id"] for subtask in sanitized_subtasks}
     for subtask in sanitized_subtasks:
@@ -516,6 +532,8 @@ def _validate_decomposition(
         "terminal_subtask_id": terminal_subtask_id,
         "valid": is_acyclic and not fallback_used,
         "fallback_used": fallback_used,
+        "proposed_num_subtasks_raw": proposed_num_subtasks_raw,
+        "overflow_rejected": overflow_rejected,
     }
 
 
@@ -792,6 +810,7 @@ def _build_decomposer_prompt(
     worker_agents: List[Dict[str, Any]],
     memory_snapshot: Dict[str, Any],
     max_subtasks: int,
+    absolute_max_subtasks: int,
     candidate_index: int = 0,
     total_candidates: int = 1,
     prior_candidates: Optional[List[Dict[str, Any]]] = None,
@@ -817,7 +836,8 @@ def _build_decomposer_prompt(
     return (
         "You are the Decomposer in a multi-agent math workflow.\n"
         "Break the task into a dependency-aware DAG of subtasks that fits the available worker agents.\n"
-        f"Use at most {max_subtasks} subtasks before any auto-added terminal synthesis.\n"
+        f"Target {max_subtasks} subtasks before any auto-added terminal synthesis.\n"
+        f"Candidates above {max_subtasks} subtasks are penalized, and candidates above {absolute_max_subtasks} are rejected.\n"
         "Prefer decompositions that expose meaningful parallel branches when useful, but keep them executable.\n"
         f"This is decomposition candidate {candidate_index + 1} of {total_candidates}.\n"
         "When possible, propose a meaningfully different valid decomposition from earlier candidates instead of repeating them.\n"
@@ -1020,18 +1040,24 @@ def _compute_selector_reward(
     assignment_plan: Dict[str, Any],
     final_reward: float,
     orchestration_cfg,
-) -> float:
+) -> Tuple[float, Dict[str, float]]:
     assignments = assignment_plan.get("assignments", [])
     avg_partial = sum(partial_rewards.values()) / float(max(1, len(partial_rewards)))
     avg_compatibility = sum(assignment.get("compatibility", 0.0) for assignment in assignments) / float(max(1, len(assignments)))
     final_weight = float(_config_value(orchestration_cfg, "selector_final_reward_weight", 0.40))
     partial_weight = float(_config_value(orchestration_cfg, "selector_partial_reward_weight", 0.35))
     compatibility_weight = float(_config_value(orchestration_cfg, "selector_compatibility_weight", 0.25))
-    return _clip(
-        final_weight * float(final_reward) +
-        partial_weight * avg_partial +
-        compatibility_weight * avg_compatibility
-    )
+    final_component = final_weight * float(final_reward)
+    partial_component = partial_weight * avg_partial
+    compatibility_component = compatibility_weight * avg_compatibility
+    reward = _clip(final_component + partial_component + compatibility_component)
+    return reward, {
+        "average_partial_reward": float(avg_partial),
+        "average_compatibility": float(avg_compatibility),
+        "selector_final_component": float(final_component),
+        "selector_partial_component": float(partial_component),
+        "selector_compatibility_component": float(compatibility_component),
+    }
 
 
 def _compute_worker_training_reward(partial_reward: float, final_reward: float, orchestration_cfg) -> float:
@@ -1043,14 +1069,57 @@ def _compute_worker_training_reward(partial_reward: float, final_reward: float, 
 def _compute_decomposer_training_reward(
     heuristic_reward: float,
     avg_selector_reward: float,
+    proposed_num_subtasks_raw: int,
+    overflow_rejected: bool,
     orchestration_cfg,
-) -> float:
-    heuristic_weight = float(_config_value(orchestration_cfg, "decomposer_heuristic_reward_weight", 0.45))
-    selector_weight = float(_config_value(orchestration_cfg, "decomposer_selector_reward_weight", 0.55))
-    return _clip(
+) -> Tuple[float, float]:
+    heuristic_weight = float(_config_value(orchestration_cfg, "decomposer_heuristic_reward_weight", 0.30))
+    selector_weight = float(_config_value(orchestration_cfg, "decomposer_selector_reward_weight", 0.70))
+    target_subtasks = int(_config_value(orchestration_cfg, "max_subtasks", 4))
+    absolute_max_subtasks = int(
+        _config_value(orchestration_cfg, "absolute_max_subtasks", max(target_subtasks + 2, target_subtasks))
+    )
+    budget_penalty_lambda = float(_config_value(orchestration_cfg, "decomposer_budget_penalty_lambda", 0.20))
+    overflow_reward_cap = float(_config_value(orchestration_cfg, "decomposer_overflow_reward_cap", 0.10))
+
+    budget_penalty = 0.0
+    if proposed_num_subtasks_raw > target_subtasks:
+        if absolute_max_subtasks <= target_subtasks:
+            budget_penalty = budget_penalty_lambda
+        else:
+            capped_count = min(proposed_num_subtasks_raw, absolute_max_subtasks)
+            normalized_overflow = (capped_count - target_subtasks) / float(absolute_max_subtasks - target_subtasks)
+            budget_penalty = budget_penalty_lambda * (normalized_overflow ** 2)
+
+    reward = _clip(
         heuristic_weight * float(heuristic_reward) +
         selector_weight * float(avg_selector_reward)
     )
+    reward = _clip(reward - budget_penalty)
+    if overflow_rejected:
+        reward = min(reward, overflow_reward_cap)
+    return reward, float(budget_penalty)
+
+
+def _decomposition_budget_record(decomposition: Dict[str, Any], budget_penalty: float) -> Dict[str, Any]:
+    return {
+        "proposed_num_subtasks_raw": int(decomposition.get("proposed_num_subtasks_raw", 0)),
+        "budget_penalty": float(budget_penalty),
+        "overflow_rejected": bool(decomposition.get("overflow_rejected", False)),
+    }
+
+
+def _decomposer_reward_component_record(
+    heuristic_reward: float,
+    avg_selector_reward: float,
+    orchestration_cfg,
+) -> Dict[str, float]:
+    heuristic_weight = float(_config_value(orchestration_cfg, "decomposer_heuristic_reward_weight", 0.30))
+    selector_weight = float(_config_value(orchestration_cfg, "decomposer_selector_reward_weight", 0.70))
+    return {
+        "decomposer_heuristic_component": float(heuristic_weight * float(heuristic_reward)),
+        "decomposer_selector_component": float(selector_weight * float(avg_selector_reward)),
+    }
 
 
 def _compute_decomposition_reward(
@@ -1308,7 +1377,7 @@ async def _execute_assignment_branch(
             }
         )
 
-    selector_reward = _compute_selector_reward(
+    selector_reward, selector_reward_components = _compute_selector_reward(
         partial_rewards=partial_rewards,
         assignment_plan=assignment_plan,
         final_reward=final_reward,
@@ -1323,6 +1392,10 @@ async def _execute_assignment_branch(
         branch_answer_candidate=final_answer_candidate,
         average_answer_entropy_confidence=branch_entropy_metrics["average_answer_entropy_confidence"],
         average_answer_normalized_entropy=branch_entropy_metrics["average_answer_normalized_entropy"],
+        average_compatibility=selector_reward_components["average_compatibility"],
+        selector_final_component=selector_reward_components["selector_final_component"],
+        selector_partial_component=selector_reward_components["selector_partial_component"],
+        selector_compatibility_component=selector_reward_components["selector_compatibility_component"],
         average_partial_reward=(
             sum(partial_rewards.values()) / float(max(1, len(partial_rewards)))
             if partial_rewards
@@ -1344,6 +1417,7 @@ async def _execute_assignment_branch(
         "final_answer_candidate": final_answer_candidate,
         "final_reward": final_reward,
         "selector_reward": selector_reward,
+        **selector_reward_components,
         "average_answer_entropy_confidence": branch_entropy_metrics["average_answer_entropy_confidence"],
         "average_answer_normalized_entropy": branch_entropy_metrics["average_answer_normalized_entropy"],
         "agent_events": agent_events,
@@ -1371,6 +1445,9 @@ async def math_decomposer_selector_graph(
     decomposer_name, selector_name, worker_agents = _resolve_agent_roles(available_agents)
     orchestration_cfg = getattr(env.config, "orchestration", None)
     max_subtasks = int(_config_value(orchestration_cfg, "max_subtasks", 4))
+    absolute_max_subtasks = int(
+        _config_value(orchestration_cfg, "absolute_max_subtasks", max(max_subtasks + 2, max_subtasks))
+    )
     num_decompositions = max(1, int(_config_value(orchestration_cfg, "num_decompositions", 3)))
     num_selections_per_decomposition = max(
         1,
@@ -1399,6 +1476,7 @@ async def math_decomposer_selector_graph(
             worker_agents=worker_agents,
             memory_snapshot=memory_snapshot,
             max_subtasks=max_subtasks,
+            absolute_max_subtasks=absolute_max_subtasks,
             candidate_index=decomposition_index,
             total_candidates=num_decompositions,
             prior_candidates=decomposition_candidates,
@@ -1418,6 +1496,7 @@ async def math_decomposer_selector_graph(
             task=task,
             worker_agents=worker_agents,
             max_subtasks=max_subtasks,
+            absolute_max_subtasks=absolute_max_subtasks,
             require_final_synthesis_subtask=require_final_synthesis_subtask,
         )
         heuristic_decomposition_reward = _compute_decomposition_reward(
@@ -1500,6 +1579,10 @@ async def math_decomposer_selector_graph(
                 "execution_trace": branch_result["execution_trace"],
                 "partial_rewards": branch_result["partial_rewards"],
                 "selector_reward": branch_result["selector_reward"],
+                "average_compatibility": branch_result["average_compatibility"],
+                "selector_final_component": branch_result["selector_final_component"],
+                "selector_partial_component": branch_result["selector_partial_component"],
+                "selector_compatibility_component": branch_result["selector_compatibility_component"],
                 "average_answer_entropy_confidence": branch_result["average_answer_entropy_confidence"],
                 "average_answer_normalized_entropy": branch_result["average_answer_normalized_entropy"],
                 "final_answer_candidate": branch_result["final_answer_candidate"],
@@ -1523,7 +1606,15 @@ async def math_decomposer_selector_graph(
         avg_selection_answer_normalized_entropy = sum(
             candidate["average_answer_normalized_entropy"] for candidate in selector_candidate_results
         ) / float(max(1, len(selector_candidate_results)))
-        decomposer_reward = _compute_decomposer_training_reward(
+        decomposer_reward, budget_penalty = _compute_decomposer_training_reward(
+            heuristic_reward=heuristic_decomposition_reward,
+            avg_selector_reward=avg_selector_reward,
+            proposed_num_subtasks_raw=int(decomposition.get("proposed_num_subtasks_raw", 0)),
+            overflow_rejected=bool(decomposition.get("overflow_rejected", False)),
+            orchestration_cfg=orchestration_cfg,
+        )
+        budget_record = _decomposition_budget_record(decomposition, budget_penalty)
+        decomposer_component_record = _decomposer_reward_component_record(
             heuristic_reward=heuristic_decomposition_reward,
             avg_selector_reward=avg_selector_reward,
             orchestration_cfg=orchestration_cfg,
@@ -1537,6 +1628,9 @@ async def math_decomposer_selector_graph(
             average_selection_answer_entropy_confidence=avg_selection_answer_entropy_confidence,
             average_selection_answer_normalized_entropy=avg_selection_answer_normalized_entropy,
             decomposer_reward=decomposer_reward,
+            budget_penalty=budget_record["budget_penalty"],
+            decomposer_heuristic_component=decomposer_component_record["decomposer_heuristic_component"],
+            decomposer_selector_component=decomposer_component_record["decomposer_selector_component"],
             num_subtasks=len(decomposition.get("subtasks", [])),
             valid_decomposition=decomposition.get("valid", False),
         )
@@ -1553,6 +1647,8 @@ async def math_decomposer_selector_graph(
                 "avg_selection_answer_entropy_confidence": avg_selection_answer_entropy_confidence,
                 "avg_selection_answer_normalized_entropy": avg_selection_answer_normalized_entropy,
                 "decomposer_reward": decomposer_reward,
+                **decomposer_component_record,
+                **budget_record,
                 "selector_candidates": selector_candidate_results,
             }
         )
@@ -1573,12 +1669,18 @@ async def math_decomposer_selector_graph(
             "avg_selection_answer_entropy_confidence": avg_selection_answer_entropy_confidence,
             "avg_selection_answer_normalized_entropy": avg_selection_answer_normalized_entropy,
             "decomposer_reward": decomposer_reward,
+            **decomposer_component_record,
+            **budget_record,
             "selector_candidates": [
                 {
                     "selection_id": branch["selection_id"],
                     "selector_hop": branch["selector_hop"],
                     "assignment_plan": branch["assignment_plan"],
                     "selector_reward": branch["selector_reward"],
+                    "average_compatibility": branch["average_compatibility"],
+                    "selector_final_component": branch["selector_final_component"],
+                    "selector_partial_component": branch["selector_partial_component"],
+                    "selector_compatibility_component": branch["selector_compatibility_component"],
                     "average_answer_entropy_confidence": branch["average_answer_entropy_confidence"],
                     "average_answer_normalized_entropy": branch["average_answer_normalized_entropy"],
                     "final_answer_candidate": branch["final_answer_candidate"],
@@ -1646,11 +1748,20 @@ async def math_decomposer_selector_graph(
             "avg_selection_answer_entropy_confidence": candidate.get("avg_selection_answer_entropy_confidence", 0.0),
             "avg_selection_answer_normalized_entropy": candidate.get("avg_selection_answer_normalized_entropy", 0.0),
             "decomposer_reward": candidate["decomposer_reward"],
+            "decomposer_heuristic_component": candidate.get("decomposer_heuristic_component", 0.0),
+            "decomposer_selector_component": candidate.get("decomposer_selector_component", 0.0),
+            "proposed_num_subtasks_raw": candidate.get("proposed_num_subtasks_raw", 0),
+            "budget_penalty": candidate.get("budget_penalty", 0.0),
+            "overflow_rejected": candidate.get("overflow_rejected", False),
             "summary": candidate["decomposition"].get("summary", ""),
             "selector_candidates": [
                 {
                     "selection_id": branch["selection_id"],
                     "selector_reward": branch["selector_reward"],
+                    "average_compatibility": branch.get("average_compatibility", 0.0),
+                    "selector_final_component": branch.get("selector_final_component", 0.0),
+                    "selector_partial_component": branch.get("selector_partial_component", 0.0),
+                    "selector_compatibility_component": branch.get("selector_compatibility_component", 0.0),
                     "average_answer_entropy_confidence": branch.get("average_answer_entropy_confidence", 0.0),
                     "average_answer_normalized_entropy": branch.get("average_answer_normalized_entropy", 0.0),
                     "final_reward": branch["final_reward"],
@@ -1682,7 +1793,16 @@ async def math_decomposer_selector_graph(
             "avg_selection_answer_normalized_entropy", 0.0
         ),
         "decomposer_reward": best_decomposition_entry["decomposer_reward"],
+        "decomposer_heuristic_component": best_decomposition_entry.get("decomposer_heuristic_component", 0.0),
+        "decomposer_selector_component": best_decomposition_entry.get("decomposer_selector_component", 0.0),
+        "proposed_num_subtasks_raw": best_decomposition_entry.get("proposed_num_subtasks_raw", 0),
+        "budget_penalty": best_decomposition_entry.get("budget_penalty", 0.0),
+        "overflow_rejected": best_decomposition_entry.get("overflow_rejected", False),
         "selector_reward": best_branch["selector_reward"],
+        "average_compatibility": best_branch.get("average_compatibility", 0.0),
+        "selector_final_component": best_branch.get("selector_final_component", 0.0),
+        "selector_partial_component": best_branch.get("selector_partial_component", 0.0),
+        "selector_compatibility_component": best_branch.get("selector_compatibility_component", 0.0),
         "average_answer_entropy_confidence": best_branch.get("average_answer_entropy_confidence", 0.0),
         "average_answer_normalized_entropy": best_branch.get("average_answer_normalized_entropy", 0.0),
         "final_reward": best_branch["final_reward"],
@@ -1729,6 +1849,11 @@ async def math_decomposer_selector_graph(
                     "avg_selection_answer_normalized_entropy", 0.0
                 ),
                 "decomposer_reward": candidate["decomposer_reward"],
+                "decomposer_heuristic_component": candidate.get("decomposer_heuristic_component", 0.0),
+                "decomposer_selector_component": candidate.get("decomposer_selector_component", 0.0),
+                "proposed_num_subtasks_raw": candidate.get("proposed_num_subtasks_raw", 0),
+                "budget_penalty": candidate.get("budget_penalty", 0.0),
+                "overflow_rejected": candidate.get("overflow_rejected", False),
                 "selector_candidates": [
                     {
                         "selection_id": branch["selection_id"],
@@ -1740,6 +1865,10 @@ async def math_decomposer_selector_graph(
                         "execution_trace": branch["execution_trace"],
                         "partial_rewards": branch["partial_rewards"],
                         "selector_reward": branch["selector_reward"],
+                        "average_compatibility": branch.get("average_compatibility", 0.0),
+                        "selector_final_component": branch.get("selector_final_component", 0.0),
+                        "selector_partial_component": branch.get("selector_partial_component", 0.0),
+                        "selector_compatibility_component": branch.get("selector_compatibility_component", 0.0),
                         "average_answer_entropy_confidence": branch.get("average_answer_entropy_confidence", 0.0),
                         "average_answer_normalized_entropy": branch.get("average_answer_normalized_entropy", 0.0),
                         "final_solution_text": branch["final_solution_text"],

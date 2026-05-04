@@ -429,19 +429,54 @@ class MultiAgentsPPOTrainer:
         return metrics
 
     def _filter_logged_metrics(self, metrics):
-        allowed_prefixes = (
-            "roles/",
-            "rollout/",
-            "train/",
-            "validation/",
-        )
         allowed_exact = {
             "training/global_step",
+            "validation/final_answer_accuracy",
+            "train/total_trainable_samples",
+            "train/no_trainable_samples",
+            "rollout/completed_rollouts",
+            "rollout/failed_rollouts",
+            "rollout/graph_error_count",
+            "rollout/rollouts_with_hops",
+            "rollout/rollouts_without_hops",
+        }
+        allowed_role_metrics = {
+            "roles/decomposer/decomposition/training_reward/mean",
+            "roles/decomposer/decomposition/heuristic_reward/mean",
+            "roles/decomposer/decomposition/avg_selector_reward/mean",
+            "roles/decomposer/decomposition/weighted_heuristic_component/mean",
+            "roles/decomposer/decomposition/weighted_selector_component/mean",
+            "roles/decomposer/decomposition/soft_budget_penalty/mean",
+            "roles/decomposer/decomposition/avg_selector_answer_entropy_confidence/mean",
+            "roles/decomposer/decomposition/avg_selector_answer_normalized_entropy/mean",
+            "roles/decomposer/grpo/advantage/mean",
+            "roles/decomposer/grpo/advantage_nonzero_fraction",
+            "roles/decomposer/grpo/group_size_mean",
+            "roles/decomposer/actor/pg_loss",
+            "roles/decomposer/actor/ppo_kl",
+            "roles/decomposer/actor/entropy_loss",
+            "roles/decomposer/actor/shared_grad_norm",
+            "roles/selector/selection/training_reward/mean",
+            "roles/selector/selection/avg_worker_partial_reward/mean",
+            "roles/selector/selection/avg_assignment_compatibility/mean",
+            "roles/selector/selection/final_task_reward/mean",
+            "roles/selector/selection/weighted_partial_reward_component/mean",
+            "roles/selector/selection/weighted_compatibility_component/mean",
+            "roles/selector/selection/weighted_final_reward_component/mean",
+            "roles/selector/selection/avg_answer_entropy_confidence/mean",
+            "roles/selector/selection/avg_answer_normalized_entropy/mean",
+            "roles/selector/grpo/advantage/mean",
+            "roles/selector/grpo/advantage_nonzero_fraction",
+            "roles/selector/grpo/group_size_mean",
+            "roles/selector/actor/pg_loss",
+            "roles/selector/actor/ppo_kl",
+            "roles/selector/actor/entropy_loss",
+            "roles/selector/actor/shared_grad_norm",
         }
 
         filtered_metrics = {}
         for key, value in metrics.items():
-            if key in allowed_exact or key.startswith(allowed_prefixes):
+            if key in allowed_exact or key in allowed_role_metrics:
                 filtered_metrics[key] = value
 
         return filtered_metrics
@@ -491,12 +526,19 @@ class MultiAgentsPPOTrainer:
             "decomposer_reward": "decomposition/training_reward",
             "heuristic_decomposition_reward": "decomposition/heuristic_reward",
             "average_selector_reward": "decomposition/avg_selector_reward",
+            "decomposer_heuristic_component": "decomposition/weighted_heuristic_component",
+            "decomposer_selector_component": "decomposition/weighted_selector_component",
+            "budget_penalty": "decomposition/soft_budget_penalty",
             "average_selection_answer_entropy_confidence": "decomposition/avg_selector_answer_entropy_confidence",
             "average_selection_answer_normalized_entropy": "decomposition/avg_selector_answer_normalized_entropy",
             "selector_reward": "selection/training_reward",
+            "average_compatibility": "selection/avg_assignment_compatibility",
+            "selector_final_component": "selection/weighted_final_reward_component",
+            "selector_partial_component": "selection/weighted_partial_reward_component",
+            "selector_compatibility_component": "selection/weighted_compatibility_component",
             "average_answer_entropy_confidence": "selection/avg_answer_entropy_confidence",
             "average_answer_normalized_entropy": "selection/avg_answer_normalized_entropy",
-            "average_partial_reward": "selection/avg_partial_reward",
+            "average_partial_reward": "selection/avg_worker_partial_reward",
             "branch_final_reward": "selection/final_task_reward",
             "partial_reward": "execution/partial_reward",
             "training_reward": "execution/training_reward",
@@ -560,7 +602,25 @@ class MultiAgentsPPOTrainer:
             batch_keys=["responses", "input_ids", "attention_mask", "position_ids"],
             non_tensor_batch_keys=non_tensor_select_keys,
         )
-        current_policy_output = ppo_trainer.actor_rollout_wg.compute_log_prob(diagnostic_batch)
+        original_role_len = len(role_batch)
+        try:
+            dp_world_size = ppo_trainer.actor_rollout_wg.world_size
+        except Exception:
+            dp_world_size = 1
+
+        try:
+            if dp_world_size > 1:
+                diagnostic_batch, _ = pad_dataproto_to_divisor(diagnostic_batch, dp_world_size)
+
+            current_policy_output = ppo_trainer.actor_rollout_wg.compute_log_prob(diagnostic_batch)
+            if len(current_policy_output) > original_role_len:
+                current_policy_output = current_policy_output[:original_role_len]
+        except Exception as exc:
+            colorful_print(
+                f"Skipping role actor diagnostics: {type(exc).__name__}: {exc}",
+                "yellow",
+            )
+            return None
 
         current_log_prob = current_policy_output.batch["old_log_probs"]
         entropys = current_policy_output.batch["entropys"]
@@ -617,9 +677,16 @@ class MultiAgentsPPOTrainer:
             "decomposer_reward",
             "heuristic_decomposition_reward",
             "average_selector_reward",
+            "decomposer_heuristic_component",
+            "decomposer_selector_component",
+            "budget_penalty",
             "average_selection_answer_entropy_confidence",
             "average_selection_answer_normalized_entropy",
             "selector_reward",
+            "average_compatibility",
+            "selector_final_component",
+            "selector_partial_component",
+            "selector_compatibility_component",
             "average_answer_entropy_confidence",
             "average_answer_normalized_entropy",
             "average_partial_reward",
@@ -1469,6 +1536,43 @@ class MultiAgentsPPOTrainer:
         self.best_success_rate = env_success_rate
         colorful_print(f"Checkpoint save completed for env success rate {env_success_rate:.4f}.", "green")
 
+    def _extract_validation_final_answer(self, env) -> str:
+        state = getattr(env, "state", None)
+        if state is None:
+            return ""
+
+        candidate_fields = (
+            getattr(state, "final_answer_candidate", None),
+            getattr(state, "reasoning_extracted_answer", None),
+        )
+        for candidate in candidate_fields:
+            if candidate is not None and str(candidate).strip():
+                return str(candidate).strip()
+
+        raw_solution = getattr(state, "reasoning_generated_solution", None)
+        if raw_solution is None or not str(raw_solution).strip():
+            return ""
+
+        from pettingllms.mas_graph.math_graph.decomposer_selector_graph import extract_answer
+
+        return extract_answer(str(raw_solution))
+
+    def _is_validation_final_answer_correct(self, env) -> bool:
+        state = getattr(env, "state", None)
+        if state is None:
+            return False
+
+        ground_truth_answer = getattr(state, "ground_truth_answer", None)
+        if ground_truth_answer is None or not str(ground_truth_answer).strip():
+            return False
+
+        generated_answer = self._extract_validation_final_answer(env)
+        if not generated_answer:
+            return False
+
+        from pettingllms.mas_graph.math_graph.decomposer_selector_graph import check_answer_correctness
+
+        return bool(check_answer_correctness(generated_answer, str(ground_truth_answer)))
 
     def _validate(self, global_steps=0):
         self.agent_execution_engine.init_agents_and_envs(mode="validate", step_idx=global_steps)
@@ -1498,55 +1602,25 @@ class MultiAgentsPPOTrainer:
                     gen_batch_output_per_policy[model_name]
                 ])
         
-        # Calculate success metrics from env state
-        total_rollout_num = len(self.agent_execution_engine.rollout_idx_list)
-        success_rollout_rate_dict: Dict[str, float] = {}
-        success_turn_ave_dict: Dict[str, float] = {}
-        env_state_success_count = 0
-        
-        # Count success from env.state
+        total_validation_envs = len(self.agent_execution_engine.envs)
+        correct_final_answers = 0
         for env in self.agent_execution_engine.envs:
-            if hasattr(env, 'success') and env.success:
-                env_state_success_count += 1
-        
-        env_success_rate = env_state_success_count / total_rollout_num if total_rollout_num > 0 else 0.0
-        fallback_avg_turns = getattr(self.agent_execution_engine, "max_turns", 0)
-        if not fallback_avg_turns or fallback_avg_turns <= 0:
-            fallback_avg_turns = len(getattr(self.agent_execution_engine, "turn_order", [])) or 1
-        
-        for agent_name in self.agent_execution_engine.turn_order:
-            success_rollout_num = len(
-                set(self.agent_execution_engine.success_rollout_idx_list_dict.get(agent_name, []))
-            )
-            if success_rollout_num > 0:
-                success_ave_turn = self.agent_execution_engine.success_ave_turn_dict.get(agent_name, 0)/success_rollout_num
-            else:
-                success_ave_turn = fallback_avg_turns
-            success_rollout_rate_dict[agent_name] = (
-                success_rollout_num / total_rollout_num if total_rollout_num > 0 else 0.0
-            )
-            success_turn_ave_dict[agent_name] = success_ave_turn
-        
-        validation_metrics = {}
-        for agent_name in self.agent_execution_engine.turn_order:
-            success_rate = success_rollout_rate_dict.get(agent_name, 0.0)
-            avg_turns = success_turn_ave_dict.get(agent_name, 0.0)
-            
-            validation_metrics[f"validation/agent_{agent_name}/success_rate"] = success_rate
-            validation_metrics[f"validation/agent_{agent_name}/avg_turns"] = avg_turns
-        
-        if success_rollout_rate_dict:
-            success_rates = list(success_rollout_rate_dict.values())
-            avg_turns_list = list(success_turn_ave_dict.values())
-            
-            validation_metrics["validation/average/success_rate"] = sum(success_rates) / len(success_rates)
-            validation_metrics["validation/average/avg_turns"] = sum(avg_turns_list) / len(avg_turns_list)
-        
-        validation_metrics["validation/env_state_success_rate"] = env_success_rate
+            if self._is_validation_final_answer_correct(env):
+                correct_final_answers += 1
+
+        final_answer_accuracy = (
+            correct_final_answers / total_validation_envs
+            if total_validation_envs > 0
+            else 0.0
+        )
+
+        validation_metrics = {
+            "validation/final_answer_accuracy": final_answer_accuracy,
+        }
         
         # Save checkpoint if this is the best validation result
         if global_steps > 0:
-            self._save_best_checkpoint(env_success_rate)
+            self._save_best_checkpoint(final_answer_accuracy)
             
         return validation_metrics
     
