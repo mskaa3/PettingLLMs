@@ -2,6 +2,7 @@
 # limitations under the License.
 import asyncio
 import heapq
+import json
 import logging
 import os
 import random
@@ -438,6 +439,7 @@ async def llm_async_generate(
         kwargs["spaces_between_special_tokens"] = spaces_between_special_tokens
     batch_size = len(prompt_dpr.non_tensor_batch["formatted_prompts"])
     batch_response_ids: list[list[int]] = [[] for _ in range(batch_size)]
+    response_metadata_list = []
     text_list = []  # Initialize text list for multiple samples
 
     # vLLM uses the 'model' parameter to specify which LoRA adapter to use
@@ -497,6 +499,7 @@ async def llm_async_generate(
             for _ in range(sample_num):
                 comps.append([tokenizer.eos_token_id])
                 batch_texts.append("")
+                response_metadata_list.append({})
             batch_response_ids[batch_index] = comps
             text_list.extend(batch_texts)
             continue
@@ -506,6 +509,7 @@ async def llm_async_generate(
             for _ in range(sample_num):
                 comps.append([tokenizer.eos_token_id])
                 batch_texts.append("")
+                response_metadata_list.append({})
             batch_response_ids[batch_index] = comps
             text_list.extend(batch_texts)
             continue
@@ -517,18 +521,30 @@ async def llm_async_generate(
                 for _ in range(sample_num):
                     comps.append([tokenizer.eos_token_id])
                     batch_texts.append("")
+                    response_metadata_list.append({})
             else:
                 for choice in choices:
-                    token_ids = choice.get("logprobs", {}).get("tokens", [])
+                    choice_logprobs = choice.get("logprobs", {}) or {}
+                    token_ids = choice_logprobs.get("tokens", [])
                     text = choice.get("text", "")
                     batch_texts.append(text)
                     token_ids = [int(t.split(":")[1]) for t in token_ids]
                     comps.append(token_ids)
+                    response_metadata_list.append(
+                        {
+                            "text": text,
+                            "tokens": choice_logprobs.get("tokens", []),
+                            "token_logprobs": choice_logprobs.get("token_logprobs", []),
+                            "top_logprobs": choice_logprobs.get("top_logprobs", []),
+                            "text_offset": choice_logprobs.get("text_offset", []),
+                        }
+                    )
                     
         except Exception as e:
             for _ in range(sample_num):
                 comps.append([tokenizer.eos_token_id])
                 batch_texts.append("")
+                response_metadata_list.append({})
             
         batch_response_ids[batch_index] = comps
         text_list.extend(batch_texts)
@@ -542,6 +558,14 @@ async def llm_async_generate(
     output_dpr.non_tensor_batch["env_idx"] = np.array([env_idx] * batch_size, dtype=object)
     output_dpr.non_tensor_batch["turn_idx"] = np.array([turn_idx] * batch_size, dtype=object)
     output_dpr.non_tensor_batch["agent_idx"] = np.array([agent_idx] * batch_size, dtype=object)
+    if len(response_metadata_list) < batch_size:
+        response_metadata_list.extend({} for _ in range(batch_size - len(response_metadata_list)))
+    elif len(response_metadata_list) > batch_size:
+        response_metadata_list = response_metadata_list[:batch_size]
+    output_dpr.non_tensor_batch["response_metadata_json"] = np.array(
+        [json.dumps(metadata) for metadata in response_metadata_list],
+        dtype=object,
+    )
 
     # Fallback: if text_list is empty but we have response token ids, decode to string
     if (not text_list or all(not t for t in text_list)) and tokenizer is not None:

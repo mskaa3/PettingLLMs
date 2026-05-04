@@ -398,6 +398,7 @@ async def _patched_generate(
         Tuple of (response_text, prompt_tokens, completion_tokens, token_ids)
     """
     from pettingllms.trainer.async_generate import llm_async_generate, convert_prompt_to_dpr
+    request_tag = kwargs.pop("request_tag", None)
 
     # Resolve policy_name from agent_name
     policy_name = _agent_policy_mapping.get(agent_name)
@@ -529,6 +530,8 @@ async def _patched_generate(
         # Add agent_name and hop_idx to output_dpr for trajectory collection
         output_dpr.non_tensor_batch["agent_name"] = np.array([agent_name or "unknown"], dtype=object)
         output_dpr.non_tensor_batch["hop_idx"] = np.array([hop_idx], dtype=np.int32)
+        if request_tag is not None:
+            output_dpr.non_tensor_batch["request_tag"] = np.array([request_tag], dtype=object)
 
         # Store in trajectory store
         _trajectory_store = _get_trajectory_store_ref()

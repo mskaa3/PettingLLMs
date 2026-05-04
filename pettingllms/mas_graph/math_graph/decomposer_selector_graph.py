@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
+import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from pettingllms.mas_graph.math_graph.math_env import MathEnv
-from pettingllms.utils.openai import get_hop_idx, get_rollout_idx
+from pettingllms.utils.openai import get_client_dataprotos, get_hop_idx, get_rollout_idx
 
 
 _TREE_RECORD_WRITE_LOCK = threading.Lock()
@@ -108,6 +110,132 @@ def _coerce_confidence_value(value: Any, default: float = 0.5) -> float:
         return _clip(float(normalized))
     except (TypeError, ValueError):
         return default
+
+
+def _parse_response_metadata(raw_metadata: Any) -> Dict[str, Any]:
+    if raw_metadata is None:
+        return {}
+    if isinstance(raw_metadata, dict):
+        return raw_metadata
+    if isinstance(raw_metadata, str):
+        try:
+            loaded = json.loads(raw_metadata)
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _normalized_entropy_from_top_logprobs(top_logprobs_entry: Any) -> Optional[float]:
+    if isinstance(top_logprobs_entry, dict):
+        logprob_values = list(top_logprobs_entry.values())
+    elif isinstance(top_logprobs_entry, list):
+        logprob_values = []
+        for item in top_logprobs_entry:
+            if isinstance(item, dict):
+                logprob_values.extend(item.values())
+    else:
+        return None
+
+    finite_logprobs = []
+    for value in logprob_values:
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(scalar):
+            finite_logprobs.append(scalar)
+
+    if len(finite_logprobs) < 2:
+        return None
+
+    max_logprob = max(finite_logprobs)
+    exp_values = [math.exp(value - max_logprob) for value in finite_logprobs]
+    normalizer = sum(exp_values)
+    if normalizer <= 0.0:
+        return None
+
+    probabilities = [value / normalizer for value in exp_values]
+    entropy = -sum(prob * math.log(prob + 1e-12) for prob in probabilities)
+    max_entropy = math.log(len(probabilities))
+    if max_entropy <= 0.0:
+        return None
+    return _clip(entropy / max_entropy)
+
+
+def _answer_entropy_stats(
+    answer_candidate: str,
+    raw_output: str,
+    response_metadata: Optional[Dict[str, Any]],
+    default: float = 0.5,
+) -> Dict[str, float]:
+    if not answer_candidate:
+        return {
+            "answer_entropy_confidence": 0.0,
+            "answer_normalized_entropy": 1.0,
+        }
+
+    metadata = _parse_response_metadata(response_metadata)
+    top_logprobs = metadata.get("top_logprobs") or []
+    text_offsets = metadata.get("text_offset") or []
+    if not isinstance(top_logprobs, list) or not isinstance(text_offsets, list):
+        return {
+            "answer_entropy_confidence": _clip(default),
+            "answer_normalized_entropy": _clip(1.0 - default),
+        }
+    if len(top_logprobs) == 0 or len(top_logprobs) != len(text_offsets):
+        return {
+            "answer_entropy_confidence": _clip(default),
+            "answer_normalized_entropy": _clip(1.0 - default),
+        }
+
+    answer_text = str(answer_candidate).strip()
+    if not answer_text:
+        return {
+            "answer_entropy_confidence": 0.0,
+            "answer_normalized_entropy": 1.0,
+        }
+
+    span_start = str(raw_output or "").rfind(answer_text)
+    if span_start < 0:
+        return {
+            "answer_entropy_confidence": _clip(default),
+            "answer_normalized_entropy": _clip(1.0 - default),
+        }
+    span_end = span_start + len(answer_text)
+
+    token_entropies = []
+    for index, token_start in enumerate(text_offsets):
+        try:
+            token_start = int(token_start)
+        except (TypeError, ValueError):
+            continue
+        token_end = len(raw_output or "") if index == len(text_offsets) - 1 else text_offsets[index + 1]
+        try:
+            token_end = int(token_end)
+        except (TypeError, ValueError):
+            token_end = token_start
+
+        overlaps_span = token_start < span_end and token_end > span_start
+        if not overlaps_span:
+            continue
+
+        token_entropy = _normalized_entropy_from_top_logprobs(top_logprobs[index])
+        if token_entropy is not None:
+            token_entropies.append(token_entropy)
+
+    if not token_entropies:
+        return {
+            "answer_entropy_confidence": _clip(default),
+            "answer_normalized_entropy": _clip(1.0 - default),
+        }
+
+    normalized_entropy = sum(token_entropies) / float(len(token_entropies))
+    normalized_entropy = _clip(normalized_entropy)
+    return {
+        "answer_entropy_confidence": _clip(1.0 - normalized_entropy),
+        "answer_normalized_entropy": normalized_entropy,
+    }
 
 
 def _extract_json_candidate(text: str) -> Optional[str]:
@@ -773,7 +901,7 @@ def _build_worker_prompt(
         f"Profile: {assigned_agent.get('description', '')}\n"
         f"Capabilities: {assigned_agent.get('capabilities', [])}\n"
         "Solve the assigned subtask using the dependency outputs when relevant.\n"
-        "Return JSON only with keys: status, result, answer_candidate, confidence.\n"
+        "Return JSON only with keys: status, result, answer_candidate.\n"
         "Use status='completed' unless you are clearly blocked.\n\n"
         f"Original task:\n{task}\n\n"
         f"Assigned subtask:\n{json.dumps(subtask, indent=2)}\n\n"
@@ -785,13 +913,30 @@ async def _call_agent(
     model_client_dict: Dict[str, OpenAIChatCompletionClient],
     agent_name: str,
     prompt: str,
-) -> str:
+) -> Tuple[str, Dict[str, Any]]:
     client = model_client_dict.get(agent_name)
     if client is None:
         client = next(iter(model_client_dict.values()))
-    response = await client.create([{"role": "user", "content": prompt}])
+    request_tag = str(uuid.uuid4())
+    response = await client.create([{"role": "user", "content": prompt}], request_tag=request_tag)
     content = getattr(response, "content", "")
-    return content if isinstance(content, str) else str(content)
+    response_text = content if isinstance(content, str) else str(content)
+
+    response_metadata: Dict[str, Any] = {}
+    dataprotos = get_client_dataprotos(client)
+    for data_proto in reversed(dataprotos):
+        non_tensor_batch = getattr(data_proto, "non_tensor_batch", {}) or {}
+        request_tag_values = non_tensor_batch.get("request_tag")
+        if request_tag_values is None or len(request_tag_values) == 0:
+            continue
+        if str(request_tag_values[0]) != request_tag:
+            continue
+        metadata_values = non_tensor_batch.get("response_metadata_json")
+        if metadata_values is not None and len(metadata_values) > 0:
+            response_metadata = _parse_response_metadata(metadata_values[0])
+        break
+
+    return response_text, response_metadata
 
 
 def _register_next_hop(env: MathEnv, **metadata) -> int:
@@ -800,25 +945,43 @@ def _register_next_hop(env: MathEnv, **metadata) -> int:
     return hop_idx
 
 
-def _parse_worker_output(raw_output: str) -> Dict[str, Any]:
+def _parse_worker_output(raw_output: str, response_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = _load_json_response(raw_output)
     if isinstance(payload, dict):
         result = str(payload.get("result") or "").strip()
         answer_candidate = str(payload.get("answer_candidate") or "").strip()
         if not answer_candidate:
             answer_candidate = extract_answer(result or raw_output)
+        entropy_stats = _answer_entropy_stats(
+            answer_candidate=answer_candidate,
+            raw_output=raw_output,
+            response_metadata=response_metadata,
+        )
         return {
             "status": str(payload.get("status") or "completed").strip(),
             "result": result or raw_output.strip(),
             "answer_candidate": answer_candidate,
-            "confidence": _coerce_confidence_value(payload.get("confidence", 0.5), default=0.5),
+            **entropy_stats,
             "raw_output": raw_output,
         }
+    answer_candidate = extract_answer(raw_output)
+    entropy_stats = (
+        _answer_entropy_stats(
+            answer_candidate=answer_candidate,
+            raw_output=raw_output,
+            response_metadata=response_metadata,
+        )
+        if raw_output.strip()
+        else {
+            "answer_entropy_confidence": 0.0,
+            "answer_normalized_entropy": 1.0,
+        }
+    )
     return {
         "status": "completed" if raw_output.strip() else "failed",
         "result": raw_output.strip(),
-        "answer_candidate": extract_answer(raw_output),
-        "confidence": 0.5 if raw_output.strip() else 0.0,
+        "answer_candidate": answer_candidate,
+        **entropy_stats,
         "raw_output": raw_output,
     }
 
@@ -835,15 +998,13 @@ def _compute_worker_partial_reward(
         reward += 0.25
     if execution.get("result"):
         reward += 0.20
-    if len(execution.get("result", "")) > 80:
-        reward += 0.10
     reward += 0.20 * float(assignment.get("compatibility", 0.0))
-    reward += 0.10 * _clip(execution.get("confidence", 0.0))
+    reward += 0.10 * _clip(execution.get("answer_entropy_confidence", 0.5))
 
     answer_candidate = execution.get("answer_candidate", "")
     if answer_candidate:
         reward += 0.05
-        if check_answer_correctness(answer_candidate, ground_truth_answer):
+        if subtask.get("kind") == "final_synthesis" and check_answer_correctness(answer_candidate, ground_truth_answer):
             reward += 0.10
 
     if subtask.get("kind") == "final_synthesis":
@@ -956,6 +1117,35 @@ def _update_hop_metadata(env: MathEnv, hop_idx: Optional[int], **metadata) -> No
     env.state.hop_metadata.setdefault(hop_idx, {}).update(metadata)
 
 
+def _average_worker_entropy_metrics(worker_executions: List[Dict[str, Any]]) -> Dict[str, float]:
+    entropy_confidences: List[float] = []
+    normalized_entropies: List[float] = []
+
+    for execution_entry in worker_executions:
+        output = execution_entry.get("output", {}) or {}
+        try:
+            entropy_confidences.append(float(output.get("answer_entropy_confidence")))
+        except (TypeError, ValueError):
+            pass
+        try:
+            normalized_entropies.append(float(output.get("answer_normalized_entropy")))
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "average_answer_entropy_confidence": (
+            sum(entropy_confidences) / float(len(entropy_confidences))
+            if entropy_confidences
+            else 0.0
+        ),
+        "average_answer_normalized_entropy": (
+            sum(normalized_entropies) / float(len(normalized_entropies))
+            if normalized_entropies
+            else 0.0
+        ),
+    }
+
+
 def _branch_sort_key(branch_result: Dict[str, Any]) -> Tuple[float, float, float, float]:
     avg_partial_reward = sum(branch_result.get("partial_rewards", {}).values()) / float(
         max(1, len(branch_result.get("partial_rewards", {})))
@@ -1019,8 +1209,8 @@ async def _execute_assignment_branch(
                 branch_id=branch_id,
                 grpo_uid=f"worker|tree_{tree_group_id}|{decomposition_id}|{selection_id}|{subtask_id}",
             )
-            worker_output = await _call_agent(model_client_dict, worker_name, worker_prompt)
-            parsed_output = _parse_worker_output(worker_output)
+            worker_output, worker_response_metadata = await _call_agent(model_client_dict, worker_name, worker_prompt)
+            parsed_output = _parse_worker_output(worker_output, response_metadata=worker_response_metadata)
             subtask_hops[subtask_id] = hop_idx
             subtask_outputs[subtask_id] = {
                 **parsed_output,
@@ -1037,6 +1227,8 @@ async def _execute_assignment_branch(
                     "hop_idx": hop_idx,
                     "status": parsed_output["status"],
                     "answer_candidate": parsed_output["answer_candidate"],
+                    "answer_entropy_confidence": parsed_output.get("answer_entropy_confidence"),
+                    "answer_normalized_entropy": parsed_output.get("answer_normalized_entropy"),
                 }
             )
             worker_executions.append(
@@ -1049,6 +1241,7 @@ async def _execute_assignment_branch(
                 }
             )
 
+    branch_entropy_metrics = _average_worker_entropy_metrics(worker_executions)
     terminal_subtask_id = decomposition["terminal_subtask_id"]
     terminal_output = subtask_outputs.get(terminal_subtask_id, {})
     final_solution_text = terminal_output.get("raw_output") or terminal_output.get("result", "")
@@ -1128,6 +1321,8 @@ async def _execute_assignment_branch(
         selector_reward=selector_reward,
         branch_final_reward=final_reward,
         branch_answer_candidate=final_answer_candidate,
+        average_answer_entropy_confidence=branch_entropy_metrics["average_answer_entropy_confidence"],
+        average_answer_normalized_entropy=branch_entropy_metrics["average_answer_normalized_entropy"],
         average_partial_reward=(
             sum(partial_rewards.values()) / float(max(1, len(partial_rewards)))
             if partial_rewards
@@ -1149,6 +1344,8 @@ async def _execute_assignment_branch(
         "final_answer_candidate": final_answer_candidate,
         "final_reward": final_reward,
         "selector_reward": selector_reward,
+        "average_answer_entropy_confidence": branch_entropy_metrics["average_answer_entropy_confidence"],
+        "average_answer_normalized_entropy": branch_entropy_metrics["average_answer_normalized_entropy"],
         "agent_events": agent_events,
         "selector_events": selector_events,
     }
@@ -1215,7 +1412,7 @@ async def math_decomposer_selector_graph(
             decomposition_id=decomposition_id,
             grpo_uid=f"decomposer|tree_{tree_group_id}",
         )
-        decomposer_output = await _call_agent(model_client_dict, decomposer_name, decomposer_prompt)
+        decomposer_output, _ = await _call_agent(model_client_dict, decomposer_name, decomposer_prompt)
         decomposition = _validate_decomposition(
             decomposition=_load_json_response(decomposer_output),
             task=task,
@@ -1252,7 +1449,7 @@ async def math_decomposer_selector_graph(
                 branch_id=f"{decomposition_id}:{selection_id}",
                 grpo_uid=f"selector|tree_{tree_group_id}|{decomposition_id}",
             )
-            selector_output = await _call_agent(model_client_dict, selector_name, selector_prompt)
+            selector_output, _ = await _call_agent(model_client_dict, selector_name, selector_prompt)
             assignment_plan = _validate_assignment(
                 assignment=_load_json_response(selector_output),
                 decomposition=decomposition,
@@ -1303,6 +1500,8 @@ async def math_decomposer_selector_graph(
                 "execution_trace": branch_result["execution_trace"],
                 "partial_rewards": branch_result["partial_rewards"],
                 "selector_reward": branch_result["selector_reward"],
+                "average_answer_entropy_confidence": branch_result["average_answer_entropy_confidence"],
+                "average_answer_normalized_entropy": branch_result["average_answer_normalized_entropy"],
                 "final_answer_candidate": branch_result["final_answer_candidate"],
                 "final_reward": branch_result["final_reward"],
             }
@@ -1318,6 +1517,12 @@ async def math_decomposer_selector_graph(
         avg_selector_reward = sum(
             candidate["selector_reward"] for candidate in selector_candidate_results
         ) / float(max(1, len(selector_candidate_results)))
+        avg_selection_answer_entropy_confidence = sum(
+            candidate["average_answer_entropy_confidence"] for candidate in selector_candidate_results
+        ) / float(max(1, len(selector_candidate_results)))
+        avg_selection_answer_normalized_entropy = sum(
+            candidate["average_answer_normalized_entropy"] for candidate in selector_candidate_results
+        ) / float(max(1, len(selector_candidate_results)))
         decomposer_reward = _compute_decomposer_training_reward(
             heuristic_reward=heuristic_decomposition_reward,
             avg_selector_reward=avg_selector_reward,
@@ -1329,6 +1534,8 @@ async def math_decomposer_selector_graph(
             decomposer_hop,
             heuristic_decomposition_reward=heuristic_decomposition_reward,
             average_selector_reward=avg_selector_reward,
+            average_selection_answer_entropy_confidence=avg_selection_answer_entropy_confidence,
+            average_selection_answer_normalized_entropy=avg_selection_answer_normalized_entropy,
             decomposer_reward=decomposer_reward,
             num_subtasks=len(decomposition.get("subtasks", [])),
             valid_decomposition=decomposition.get("valid", False),
@@ -1343,6 +1550,8 @@ async def math_decomposer_selector_graph(
                 "decomposition": decomposition,
                 "heuristic_decomposition_reward": heuristic_decomposition_reward,
                 "avg_selector_reward": avg_selector_reward,
+                "avg_selection_answer_entropy_confidence": avg_selection_answer_entropy_confidence,
+                "avg_selection_answer_normalized_entropy": avg_selection_answer_normalized_entropy,
                 "decomposer_reward": decomposer_reward,
                 "selector_candidates": selector_candidate_results,
             }
@@ -1361,6 +1570,8 @@ async def math_decomposer_selector_graph(
             "decomposition": decomposition,
             "heuristic_decomposition_reward": heuristic_decomposition_reward,
             "avg_selector_reward": avg_selector_reward,
+            "avg_selection_answer_entropy_confidence": avg_selection_answer_entropy_confidence,
+            "avg_selection_answer_normalized_entropy": avg_selection_answer_normalized_entropy,
             "decomposer_reward": decomposer_reward,
             "selector_candidates": [
                 {
@@ -1368,6 +1579,8 @@ async def math_decomposer_selector_graph(
                     "selector_hop": branch["selector_hop"],
                     "assignment_plan": branch["assignment_plan"],
                     "selector_reward": branch["selector_reward"],
+                    "average_answer_entropy_confidence": branch["average_answer_entropy_confidence"],
+                    "average_answer_normalized_entropy": branch["average_answer_normalized_entropy"],
                     "final_answer_candidate": branch["final_answer_candidate"],
                     "final_reward": branch["final_reward"],
                 }
@@ -1430,12 +1643,16 @@ async def math_decomposer_selector_graph(
             "decomposition_id": candidate["decomposition_id"],
             "heuristic_decomposition_reward": candidate["heuristic_decomposition_reward"],
             "avg_selector_reward": candidate["avg_selector_reward"],
+            "avg_selection_answer_entropy_confidence": candidate.get("avg_selection_answer_entropy_confidence", 0.0),
+            "avg_selection_answer_normalized_entropy": candidate.get("avg_selection_answer_normalized_entropy", 0.0),
             "decomposer_reward": candidate["decomposer_reward"],
             "summary": candidate["decomposition"].get("summary", ""),
             "selector_candidates": [
                 {
                     "selection_id": branch["selection_id"],
                     "selector_reward": branch["selector_reward"],
+                    "average_answer_entropy_confidence": branch.get("average_answer_entropy_confidence", 0.0),
+                    "average_answer_normalized_entropy": branch.get("average_answer_normalized_entropy", 0.0),
                     "final_reward": branch["final_reward"],
                     "final_answer_candidate": branch["final_answer_candidate"],
                     "assignments": branch["assignment_plan"].get("assignments", []),
@@ -1458,8 +1675,16 @@ async def math_decomposer_selector_graph(
         "selection_id": best_branch["selection_id"],
         "heuristic_decomposition_reward": best_decomposition_entry["heuristic_decomposition_reward"],
         "avg_selector_reward": best_decomposition_entry["avg_selector_reward"],
+        "avg_selection_answer_entropy_confidence": best_decomposition_entry.get(
+            "avg_selection_answer_entropy_confidence", 0.0
+        ),
+        "avg_selection_answer_normalized_entropy": best_decomposition_entry.get(
+            "avg_selection_answer_normalized_entropy", 0.0
+        ),
         "decomposer_reward": best_decomposition_entry["decomposer_reward"],
         "selector_reward": best_branch["selector_reward"],
+        "average_answer_entropy_confidence": best_branch.get("average_answer_entropy_confidence", 0.0),
+        "average_answer_normalized_entropy": best_branch.get("average_answer_normalized_entropy", 0.0),
         "final_reward": best_branch["final_reward"],
         "final_answer_candidate": best_branch["final_answer_candidate"],
     }
@@ -1497,6 +1722,12 @@ async def math_decomposer_selector_graph(
                 "decomposition": candidate["decomposition"],
                 "heuristic_decomposition_reward": candidate["heuristic_decomposition_reward"],
                 "avg_selector_reward": candidate["avg_selector_reward"],
+                "avg_selection_answer_entropy_confidence": candidate.get(
+                    "avg_selection_answer_entropy_confidence", 0.0
+                ),
+                "avg_selection_answer_normalized_entropy": candidate.get(
+                    "avg_selection_answer_normalized_entropy", 0.0
+                ),
                 "decomposer_reward": candidate["decomposer_reward"],
                 "selector_candidates": [
                     {
@@ -1509,6 +1740,8 @@ async def math_decomposer_selector_graph(
                         "execution_trace": branch["execution_trace"],
                         "partial_rewards": branch["partial_rewards"],
                         "selector_reward": branch["selector_reward"],
+                        "average_answer_entropy_confidence": branch.get("average_answer_entropy_confidence", 0.0),
+                        "average_answer_normalized_entropy": branch.get("average_answer_normalized_entropy", 0.0),
                         "final_solution_text": branch["final_solution_text"],
                         "final_answer_candidate": branch["final_answer_candidate"],
                         "final_reward": branch["final_reward"],
